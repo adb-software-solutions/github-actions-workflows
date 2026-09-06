@@ -6,6 +6,9 @@ on:
       application:
         type: string
         required: true
+      image-tag:
+        type: string
+        default: latest
       infisical-identity-id:
         type: string
         required: true
@@ -44,6 +47,7 @@ jobs:
         shell: bash
         env:
           APPLICATION: ${{ inputs.application }}
+          IMAGE_TAG: ${{ inputs.image-tag }}
         run: |
           set -euo pipefail
 
@@ -54,6 +58,11 @@ jobs:
 
           if [[ ! "${APPLICATION}" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
             echo "Application names must contain only lowercase letters, numbers, and hyphens." >&2
+            exit 1
+          fi
+
+          if [[ ! "${IMAGE_TAG}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "Image tag is not a valid Docker tag." >&2
             exit 1
           fi
 
@@ -197,6 +206,7 @@ jobs:
           set -euo pipefail
           ansible-playbook deploy_application.yml \
             --extra-vars "application_name=${{ inputs.application }}" \
+            --extra-vars "deployment_image_tag=${{ inputs.image-tag }}" \
             --extra-vars "@${{ steps.ansible-vars.outputs.path }}"
 
       - name: Remove temporary deployment material
