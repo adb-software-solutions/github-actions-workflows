@@ -29,15 +29,15 @@ on:
         type: string
         default: ""
       build-arg-keys:
-        description: JSON array of application secret names to pass as Docker build args.
+        description: JSON array of non-sensitive application values to pass as Docker build args.
         type: string
         default: "[]"
       build-env-file:
-        description: Optional path to a dotenv file created before Docker build.
+        description: Optional path to a dotenv file for non-sensitive build-time configuration.
         type: string
         default: ""
       build-env-keys:
-        description: JSON array of application secret names written to build-env-file.
+        description: JSON array of non-sensitive application values written to build-env-file.
         type: string
         default: "[]"
       infisical-api-url:
