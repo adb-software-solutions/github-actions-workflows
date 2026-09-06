@@ -58,7 +58,7 @@ jobs:
         image: ${{ fromJSON(inputs.images) }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Infisical CLI
         run: npm install --global @infisical/cli
@@ -96,6 +96,8 @@ jobs:
           token="$(infisical secrets get DO_REGISTRY_ACCESS_TOKEN \
             --projectId="${{ inputs.infisical-registry-project-id }}" \
             --env=prod --path=/docker-registry --plain --silent)"
+          test -n "${username}"
+          test -n "${token}"
           echo "::add-mask::${token}"
           printf '%s' "${token}" | docker login \
             --username "${username}" --password-stdin registry.digitalocean.com
@@ -118,6 +120,7 @@ jobs:
             value="$(infisical secrets get "${key}" \
               --projectId="${{ inputs.infisical-application-project-id }}" \
               --env=prod --path=/ --plain --silent)"
+            test -n "${value}"
             echo "::add-mask::${value}"
             printf '%s\0%s\0' "--build-arg" "${key}=${value}" >> "${args_file}"
           done < <(jq -r '.[]' <<< "${BUILD_ARG_KEYS}")
@@ -131,6 +134,7 @@ jobs:
               value="$(infisical secrets get "${key}" \
                 --projectId="${{ inputs.infisical-application-project-id }}" \
                 --env=prod --path=/ --plain --silent)"
+              test -n "${value}"
               echo "::add-mask::${value}"
               printf '%s=%s\n' "${key}" "${value}" >> "${BUILD_ENV_FILE}"
             done < <(jq -r '.[]' <<< "${BUILD_ENV_KEYS}")
@@ -161,6 +165,10 @@ jobs:
         if: always() && inputs.build-env-file != ''
         run: rm -f "${{ inputs.build-env-file }}"
 
+      - name: Remove temporary build arguments
+        if: always()
+        run: rm -f "${{ steps.build-values.outputs.args-file }}"
+
       - name: Trivy image scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -170,7 +178,7 @@ jobs:
           output: trivy-${{ matrix.image }}-scan.txt
 
       - name: Upload Trivy scan
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: trivy-image-scan-${{ matrix.image }}
           path: trivy-${{ matrix.image }}-scan.txt
