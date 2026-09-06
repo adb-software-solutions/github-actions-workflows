@@ -82,6 +82,14 @@ Before a production application is onboarded, its Infisical OIDC binding should 
 
 For pull requests from public repositories, secret-bearing jobs must not authenticate for fork PRs. The reusable workflows defensively avoid Infisical authentication for fork pull requests, but callers should also keep untrusted fork jobs secret-free and must not use `pull_request_target` to execute untrusted changes with secrets.
 
+## Docker build values
+
+`docker-build-push.yml` can read selected values from an application's Infisical project for frontend/container builds. The `build-arg-keys` and `build-env-keys` mechanisms are intended for **non-sensitive build-time configuration** such as `NEXT_PUBLIC_*` values that happen to be centrally managed in Infisical.
+
+Do not pass passwords, private keys, access tokens, database credentials, or other sensitive values as Docker build arguments or bake them into generated dotenv files. Docker build arguments and files copied into build layers can become visible in image metadata or history. A workload that genuinely needs a sensitive build-time credential should use a BuildKit secret-based mechanism instead.
+
+Temporary build argument and generated dotenv files are removed by the workflow after the build.
+
 ## Deployment security
 
 `deploy-application.yml` is intentionally more restrictive than the generic CI workflows:
