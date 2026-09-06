@@ -1,0 +1,42 @@
+name: Reusable Trivy Filesystem Scan
+
+on:
+  workflow_call:
+    inputs:
+      scan-path:
+        type: string
+        default: .
+      artifact-name:
+        type: string
+        default: trivy-fs-scan
+      severity:
+        type: string
+        default: HIGH,CRITICAL
+
+permissions:
+  contents: read
+
+jobs:
+  trivy:
+    name: Trivy Filesystem Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ inputs.scan-path }}
+          severity: ${{ inputs.severity }}
+          output: trivy-fs-scan.txt
+        env:
+          TRIVY_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-db,public.ecr.aws/aquasecurity/trivy-db
+          TRIVY_JAVA_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-java-db,public.ecr.aws/aquasecurity/trivy-java-db
+
+      - name: Upload Trivy scan
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: trivy-fs-scan.txt

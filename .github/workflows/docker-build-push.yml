@@ -1,0 +1,174 @@
+name: Reusable Docker Build and Push
+
+on:
+  workflow_call:
+    inputs:
+      application:
+        type: string
+        required: true
+      images:
+        description: JSON array of image suffixes, for example ["backend","celery-worker"]
+        type: string
+        required: true
+      context:
+        type: string
+        default: .
+      registry:
+        type: string
+        default: registry.digitalocean.com/adbsoftwaresolutions
+      tag:
+        type: string
+        default: latest
+      infisical-identity-id:
+        type: string
+        required: true
+      infisical-registry-project-id:
+        type: string
+        required: true
+      infisical-application-project-id:
+        type: string
+        default: ""
+      build-arg-keys:
+        description: JSON array of application secret names to pass as Docker build args.
+        type: string
+        default: "[]"
+      build-env-file:
+        description: Optional path to a dotenv file created before Docker build.
+        type: string
+        default: ""
+      build-env-keys:
+        description: JSON array of application secret names written to build-env-file.
+        type: string
+        default: "[]"
+      infisical-api-url:
+        type: string
+        default: https://secrets.adbsoftwaresolutions.co.uk
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build-push-scan:
+    name: Build, Push and Scan ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(inputs.images) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Infisical CLI
+        run: npm install --global @infisical/cli
+
+      - name: Authenticate to Infisical
+        shell: bash
+        env:
+          INFISICAL_API_URL: ${{ inputs.infisical-api-url }}
+        run: |
+          set -euo pipefail
+          oidc_token="$(curl -fsS -G \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            --data-urlencode "audience=https://github.com/adb-software-solutions" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}" | jq -r '.value')"
+          access_token="$(curl -fsS -X POST \
+            "${INFISICAL_API_URL}/api/v1/auth/oidc-auth/login" \
+            -H 'Content-Type: application/x-www-form-urlencoded' \
+            --data-urlencode "identityId=${{ inputs.infisical-identity-id }}" \
+            --data-urlencode "jwt=${oidc_token}" | jq -r '.accessToken')"
+          test -n "${access_token}" && test "${access_token}" != "null"
+          echo "::add-mask::${access_token}"
+          echo "INFISICAL_API_URL=${INFISICAL_API_URL}" >> "$GITHUB_ENV"
+          echo "INFISICAL_TOKEN=${access_token}" >> "$GITHUB_ENV"
+          echo "INFISICAL_DISABLE_UPDATE_CHECK=true" >> "$GITHUB_ENV"
+
+      - name: Log in to DigitalOcean Container Registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          username="$(infisical secrets get DO_REGISTRY_USERNAME \
+            --projectId="${{ inputs.infisical-registry-project-id }}" \
+            --env=prod --path=/docker-registry --plain --silent)"
+          token="$(infisical secrets get DO_REGISTRY_ACCESS_TOKEN \
+            --projectId="${{ inputs.infisical-registry-project-id }}" \
+            --env=prod --path=/docker-registry --plain --silent)"
+          echo "::add-mask::${token}"
+          printf '%s' "${token}" | docker login \
+            --username "${username}" --password-stdin registry.digitalocean.com
+
+      - name: Prepare application build values
+        id: build-values
+        if: inputs.infisical-application-project-id != ''
+        shell: bash
+        env:
+          BUILD_ARG_KEYS: ${{ inputs.build-arg-keys }}
+          BUILD_ENV_KEYS: ${{ inputs.build-env-keys }}
+          BUILD_ENV_FILE: ${{ inputs.build-env-file }}
+        run: |
+          set -euo pipefail
+          args_file="${RUNNER_TEMP}/docker-build-args-${{ matrix.image }}"
+          : > "${args_file}"
+
+          while IFS= read -r key; do
+            [[ -z "${key}" ]] && continue
+            value="$(infisical secrets get "${key}" \
+              --projectId="${{ inputs.infisical-application-project-id }}" \
+              --env=prod --path=/ --plain --silent)"
+            echo "::add-mask::${value}"
+            printf '%s\0%s\0' "--build-arg" "${key}=${value}" >> "${args_file}"
+          done < <(jq -r '.[]' <<< "${BUILD_ARG_KEYS}")
+
+          if [[ -n "${BUILD_ENV_FILE}" ]]; then
+            mkdir -p "$(dirname "${BUILD_ENV_FILE}")"
+            umask 077
+            : > "${BUILD_ENV_FILE}"
+            while IFS= read -r key; do
+              [[ -z "${key}" ]] && continue
+              value="$(infisical secrets get "${key}" \
+                --projectId="${{ inputs.infisical-application-project-id }}" \
+                --env=prod --path=/ --plain --silent)"
+              echo "::add-mask::${value}"
+              printf '%s=%s\n' "${key}" "${value}" >> "${BUILD_ENV_FILE}"
+            done < <(jq -r '.[]' <<< "${BUILD_ENV_KEYS}")
+          fi
+
+          echo "args-file=${args_file}" >> "$GITHUB_OUTPUT"
+
+      - name: Build Docker image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${{ inputs.registry }}/${{ inputs.application }}-${{ matrix.image }}:${{ inputs.tag }}"
+          build_args=()
+          args_file="${{ steps.build-values.outputs.args-file }}"
+          if [[ -n "${args_file}" && -f "${args_file}" ]]; then
+            while IFS= read -r -d '' item; do
+              build_args+=("${item}")
+            done < "${args_file}"
+          fi
+          docker build \
+            -f "Dockerfile.${{ matrix.image }}" \
+            -t "${image}" \
+            "${build_args[@]}" \
+            "${{ inputs.context }}"
+          docker push "${image}"
+
+      - name: Remove temporary build environment file
+        if: always() && inputs.build-env-file != ''
+        run: rm -f "${{ inputs.build-env-file }}"
+
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ inputs.registry }}/${{ inputs.application }}-${{ matrix.image }}:${{ inputs.tag }}
+          severity: HIGH,CRITICAL
+          output: trivy-${{ matrix.image }}-scan.txt
+
+      - name: Upload Trivy scan
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-scan-${{ matrix.image }}
+          path: trivy-${{ matrix.image }}-scan.txt

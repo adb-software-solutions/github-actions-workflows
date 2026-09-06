@@ -1,0 +1,152 @@
+name: Reusable Frontend CI
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        type: string
+        default: "22"
+      pnpm-version:
+        type: string
+        default: ""
+      working-directory:
+        type: string
+        default: website
+      lockfile:
+        type: string
+        default: pnpm-lock.yaml
+      test-command:
+        type: string
+        default: "pnpm test --passWithNoTests"
+      build-command:
+        type: string
+        default: "pnpm run build"
+      run-tests:
+        type: boolean
+        default: true
+      run-build:
+        type: boolean
+        default: true
+      infisical-identity-id:
+        type: string
+        default: ""
+      infisical-project-id:
+        type: string
+        default: ""
+      infisical-environment:
+        type: string
+        default: dev
+      infisical-path:
+        type: string
+        default: /
+      infisical-api-url:
+        type: string
+        default: https://secrets.adbsoftwaresolutions.co.uk
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  frontend:
+    name: Frontend Test and Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm from project metadata
+        if: inputs.pnpm-version == ''
+        uses: pnpm/action-setup@v4.1.0
+
+      - name: Set up explicit pnpm version
+        if: inputs.pnpm-version != ''
+        uses: pnpm/action-setup@v4.1.0
+        with:
+          version: ${{ inputs.pnpm-version }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+          cache-dependency-path: ${{ inputs.lockfile }}
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.working-directory }}
+        run: pnpm install --frozen-lockfile
+
+      - name: Determine whether Infisical may be used
+        id: infisical-policy
+        shell: bash
+        run: |
+          allowed=true
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            base_repo="${{ github.repository }}"
+            head_repo="${{ github.event.pull_request.head.repo.full_name }}"
+            if [[ -n "${head_repo}" && "${head_repo}" != "${base_repo}" ]]; then
+              allowed=false
+            fi
+          fi
+          if [[ -z "${{ inputs.infisical-identity-id }}" || -z "${{ inputs.infisical-project-id }}" ]]; then
+            allowed=false
+          fi
+          echo "allowed=${allowed}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Infisical CLI
+        if: steps.infisical-policy.outputs.allowed == 'true'
+        run: npm install --global @infisical/cli
+
+      - name: Authenticate to Infisical
+        id: infisical-auth
+        if: steps.infisical-policy.outputs.allowed == 'true'
+        shell: bash
+        env:
+          INFISICAL_API_URL: ${{ inputs.infisical-api-url }}
+        run: |
+          set -euo pipefail
+          oidc_token="$(curl -fsS -G \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            --data-urlencode "audience=https://github.com/adb-software-solutions" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}" | jq -r '.value')"
+          access_token="$(curl -fsS -X POST \
+            "${INFISICAL_API_URL}/api/v1/auth/oidc-auth/login" \
+            -H 'Content-Type: application/x-www-form-urlencoded' \
+            --data-urlencode "identityId=${{ inputs.infisical-identity-id }}" \
+            --data-urlencode "jwt=${oidc_token}" | jq -r '.accessToken')"
+          test -n "${access_token}" && test "${access_token}" != "null"
+          echo "::add-mask::${access_token}"
+          echo "INFISICAL_API_URL=${INFISICAL_API_URL}" >> "$GITHUB_ENV"
+          echo "INFISICAL_TOKEN=${access_token}" >> "$GITHUB_ENV"
+          echo "INFISICAL_DISABLE_UPDATE_CHECK=true" >> "$GITHUB_ENV"
+          echo "authenticated=true" >> "$GITHUB_OUTPUT"
+
+      - name: Run tests with Infisical
+        if: inputs.run-tests && steps.infisical-auth.outputs.authenticated == 'true'
+        working-directory: ${{ inputs.working-directory }}
+        run: >-
+          infisical run
+          --projectId="${{ inputs.infisical-project-id }}"
+          --env="${{ inputs.infisical-environment }}"
+          --path="${{ inputs.infisical-path }}"
+          -- ${{ inputs.test-command }}
+
+      - name: Run tests without Infisical
+        if: inputs.run-tests && steps.infisical-auth.outputs.authenticated != 'true'
+        working-directory: ${{ inputs.working-directory }}
+        run: ${{ inputs.test-command }}
+
+      - name: Build with Infisical
+        if: inputs.run-build && steps.infisical-auth.outputs.authenticated == 'true'
+        working-directory: ${{ inputs.working-directory }}
+        run: >-
+          infisical run
+          --projectId="${{ inputs.infisical-project-id }}"
+          --env="${{ inputs.infisical-environment }}"
+          --path="${{ inputs.infisical-path }}"
+          -- ${{ inputs.build-command }}
+
+      - name: Build without Infisical
+        if: inputs.run-build && steps.infisical-auth.outputs.authenticated != 'true'
+        working-directory: ${{ inputs.working-directory }}
+        run: ${{ inputs.build-command }}

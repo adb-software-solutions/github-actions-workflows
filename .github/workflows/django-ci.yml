@@ -1,0 +1,183 @@
+name: Reusable Django CI
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        type: string
+        default: "3.12"
+      backend-directory:
+        type: string
+        default: backend
+      requirements-file:
+        type: string
+        default: backend/requirements/dev.txt
+      django-settings-module:
+        type: string
+        required: true
+      test-command:
+        type: string
+        default: "coverage run manage.py test -v 2"
+      postgres-image:
+        type: string
+        default: "postgres:18"
+      valkey-image:
+        type: string
+        default: "valkey/valkey:9"
+      database-name:
+        type: string
+        default: app_dev
+      database-user:
+        type: string
+        default: user
+      database-password:
+        type: string
+        default: pass
+      upload-codecov:
+        type: boolean
+        default: false
+      infisical-identity-id:
+        type: string
+        default: ""
+      infisical-ci-project-id:
+        type: string
+        default: ""
+      infisical-api-url:
+        type: string
+        default: https://secrets.adbsoftwaresolutions.co.uk
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  test:
+    name: Django Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: ${{ inputs.postgres-image }}
+        env:
+          POSTGRES_DB: ${{ inputs.database-name }}
+          POSTGRES_USER: ${{ inputs.database-user }}
+          POSTGRES_PASSWORD: ${{ inputs.database-password }}
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U ${{ inputs.database-user }}"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+      valkey:
+        image: ${{ inputs.valkey-image }}
+        ports:
+          - 6379:6379
+    env:
+      POSTGRES_DB: ${{ inputs.database-name }}
+      POSTGRES_USER: ${{ inputs.database-user }}
+      POSTGRES_PASSWORD: ${{ inputs.database-password }}
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      SQL_ENGINE: django.db.backends.postgresql
+      SQL_DATABASE: ${{ inputs.database-name }}
+      SQL_USER: ${{ inputs.database-user }}
+      SQL_PASSWORD: ${{ inputs.database-password }}
+      SQL_HOST: localhost
+      SQL_PORT: "5432"
+      DJANGO_SECRET_KEY: test
+      SECRET_KEY: test
+      DJANGO_DEBUG: "true"
+      DEBUG: "1"
+      DEBUG_TOOLBAR_ENABLED: "0"
+      SITE_DOMAIN: testserver
+      VALKEY_URL: redis://localhost:6379
+      CACHE_BACKEND_URL: redis://localhost:6379/0
+      SESSION_BACKEND_URL: redis://localhost:6379/1
+      CELERY_BROKER_URL: redis://localhost:6379/2
+      CELERY_RESULT_BACKEND: redis://localhost:6379/3
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+          cache-dependency-path: ${{ inputs.requirements-file }}
+
+      - name: Install Python dependencies
+        run: pip install -r "${{ inputs.requirements-file }}"
+
+      - name: Run Django tests
+        working-directory: ${{ inputs.backend-directory }}
+        env:
+          DJANGO_SETTINGS_MODULE: ${{ inputs.django-settings-module }}
+        run: ${{ inputs.test-command }}
+
+      - name: Generate coverage XML
+        working-directory: ${{ inputs.backend-directory }}
+        run: coverage xml
+
+      - name: Determine whether Infisical may be used
+        id: infisical-policy
+        shell: bash
+        run: |
+          allowed=true
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            base_repo="${{ github.repository }}"
+            head_repo="${{ github.event.pull_request.head.repo.full_name }}"
+            if [[ -n "${head_repo}" && "${head_repo}" != "${base_repo}" ]]; then
+              allowed=false
+            fi
+          fi
+          echo "allowed=${allowed}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Infisical CLI
+        if: inputs.upload-codecov && inputs.infisical-identity-id != '' && inputs.infisical-ci-project-id != '' && steps.infisical-policy.outputs.allowed == 'true'
+        run: npm install --global @infisical/cli
+
+      - name: Authenticate to Infisical
+        if: inputs.upload-codecov && inputs.infisical-identity-id != '' && inputs.infisical-ci-project-id != '' && steps.infisical-policy.outputs.allowed == 'true'
+        shell: bash
+        env:
+          INFISICAL_API_URL: ${{ inputs.infisical-api-url }}
+        run: |
+          set -euo pipefail
+          oidc_token="$(curl -fsS -G \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            --data-urlencode "audience=https://github.com/adb-software-solutions" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}" | jq -r '.value')"
+          access_token="$(curl -fsS -X POST \
+            "${INFISICAL_API_URL}/api/v1/auth/oidc-auth/login" \
+            -H 'Content-Type: application/x-www-form-urlencoded' \
+            --data-urlencode "identityId=${{ inputs.infisical-identity-id }}" \
+            --data-urlencode "jwt=${oidc_token}" | jq -r '.accessToken')"
+          test -n "${access_token}" && test "${access_token}" != "null"
+          echo "::add-mask::${access_token}"
+          echo "INFISICAL_API_URL=${INFISICAL_API_URL}" >> "$GITHUB_ENV"
+          echo "INFISICAL_TOKEN=${access_token}" >> "$GITHUB_ENV"
+          echo "INFISICAL_DISABLE_UPDATE_CHECK=true" >> "$GITHUB_ENV"
+
+      - name: Read Codecov token
+        id: codecov
+        if: inputs.upload-codecov && inputs.infisical-identity-id != '' && inputs.infisical-ci-project-id != '' && steps.infisical-policy.outputs.allowed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          token="$(infisical secrets get CODECOV_TOKEN \
+            --projectId="${{ inputs.infisical-ci-project-id }}" \
+            --env=dev --path=/ --plain --silent)"
+          echo "::add-mask::${token}"
+          echo "token=${token}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload coverage to Codecov
+        if: steps.codecov.outputs.token != ''
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ steps.codecov.outputs.token }}
+          files: ./${{ inputs.backend-directory }}/coverage.xml
+          flags: backend,unittests
+          name: Backend Coverage
+          fail_ci_if_error: true
