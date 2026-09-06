@@ -98,10 +98,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ inputs.python-version }}
           cache: pip
@@ -176,7 +176,7 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: steps.codecov.outputs.token != ''
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ steps.codecov.outputs.token }}
           files: ./${{ inputs.backend-directory }}/coverage.xml
