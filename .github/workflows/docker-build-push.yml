@@ -16,9 +16,6 @@ on:
       registry:
         type: string
         default: registry.digitalocean.com/adbsoftwaresolutions
-      tag:
-        type: string
-        default: latest
       infisical-identity-id:
         type: string
         required: true
@@ -142,11 +139,13 @@ jobs:
 
           echo "args-file=${args_file}" >> "$GITHUB_OUTPUT"
 
-      - name: Build Docker image
+      - name: Build and push Docker image
         shell: bash
         run: |
           set -euo pipefail
-          image="${{ inputs.registry }}/${{ inputs.application }}-${{ matrix.image }}:${{ inputs.tag }}"
+          image_repository="${{ inputs.registry }}/${{ inputs.application }}-${{ matrix.image }}"
+          latest_image="${image_repository}:latest"
+          sha_image="${image_repository}:${GITHUB_SHA}"
           build_args=()
           args_file="${{ steps.build-values.outputs.args-file }}"
           if [[ -n "${args_file}" && -f "${args_file}" ]]; then
@@ -154,12 +153,24 @@ jobs:
               build_args+=("${item}")
             done < "${args_file}"
           fi
+
           docker build \
             -f "Dockerfile.${{ matrix.image }}" \
-            -t "${image}" \
+            -t "${latest_image}" \
+            -t "${sha_image}" \
             "${build_args[@]}" \
             "${{ inputs.context }}"
-          docker push "${image}"
+
+          docker push "${sha_image}"
+          docker push "${latest_image}"
+
+          {
+            echo "### Docker image published"
+            echo
+            echo "- Image: \`${image_repository}\`"
+            echo "- Immutable tag: \`${GITHUB_SHA}\`"
+            echo "- Moving tag: \`latest\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Remove temporary build environment file
         if: always() && inputs.build-env-file != ''
@@ -173,7 +184,7 @@ jobs:
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
-          image-ref: ${{ inputs.registry }}/${{ inputs.application }}-${{ matrix.image }}:${{ inputs.tag }}
+          image-ref: ${{ inputs.registry }}/${{ inputs.application }}-${{ matrix.image }}:${{ github.sha }}
           severity: HIGH,CRITICAL
           output: trivy-${{ matrix.image }}-scan.txt
 
