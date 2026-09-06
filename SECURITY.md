@@ -18,6 +18,10 @@ The shared deployment workflow is deliberately restrictive. It only accepts the 
 
 Before production application onboarding, the corresponding Infisical OIDC binding must also constrain `job_workflow_ref` to the approved reusable workflow release. Once a release reference has been chosen, the Terraform-managed OIDC policy is part of the deployment security boundary and must be updated deliberately when that trusted workflow reference changes.
 
+## Public repository expectations
+
+Everything committed here must be safe for unrestricted public viewing. Repository names, machine identity IDs, Infisical project IDs, public service URLs, image names, and workflow configuration may be public; secret values and credentials may not.
+
 ## Reporting
 
 If a credential is ever committed here, treat it as compromised: revoke or rotate it immediately, remove it from active use, and then clean up the repository history as a separate step.
