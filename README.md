@@ -94,6 +94,8 @@ For pull requests from public repositories, secret-bearing jobs must not authent
 
 The initial repository/application bindings are CreatorClerk, TechWiki, Reseller Workbench, and Wedding of Rebecca and Peter. Additional applications should only be added when their `adb-deploy` application definition and Infisical access model are ready.
 
+The repository/application binding is intentionally explicit for the first release. Longer term, it should be generated or validated from the same application catalogue used by `adb-deploy` so there is only one authoritative mapping.
+
 ## Deployment secret mapping
 
 `deploy-application.yml` deliberately avoids application-specific secret maps. Application secrets are read from the application's Infisical project and converted to Ansible extra-vars by convention:
