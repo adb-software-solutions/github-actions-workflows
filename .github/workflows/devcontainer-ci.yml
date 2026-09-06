@@ -1,0 +1,37 @@
+name: Reusable Devcontainer CI
+
+on:
+  workflow_call:
+    inputs:
+      sub-folder:
+        type: string
+        default: ""
+      run-command:
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  devcontainer:
+    name: Build Devcontainer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build devcontainer
+        if: inputs.run-command == ''
+        uses: devcontainers/ci@v0.3
+        with:
+          subFolder: ${{ inputs.sub-folder }}
+          push: never
+
+      - name: Build devcontainer and run CI command
+        if: inputs.run-command != ''
+        uses: devcontainers/ci@v0.3
+        with:
+          subFolder: ${{ inputs.sub-folder }}
+          push: never
+          runCmd: ${{ inputs.run-command }}

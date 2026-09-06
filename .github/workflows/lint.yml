@@ -1,0 +1,89 @@
+name: Reusable Repository Lint
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        type: string
+        default: "3.12"
+      node-version:
+        type: string
+        default: "22"
+      pnpm-version:
+        type: string
+        default: ""
+      python-requirements:
+        type: string
+        default: "backend/requirements/dev.txt"
+      install-root-node-dependencies:
+        type: boolean
+        default: true
+      install-python-dependencies:
+        type: boolean
+        default: true
+      lint-command:
+        type: string
+        default: "tools/lint"
+      fetch-main:
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Run Repository Linters
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up pnpm from project metadata
+        if: inputs.pnpm-version == ''
+        uses: pnpm/action-setup@v4.1.0
+
+      - name: Set up explicit pnpm version
+        if: inputs.pnpm-version != ''
+        uses: pnpm/action-setup@v4.1.0
+        with:
+          version: ${{ inputs.pnpm-version }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+
+      - name: Install root Node dependencies
+        if: inputs.install-root-node-dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install Python tooling dependencies
+        if: inputs.install-python-dependencies
+        run: pip install -r "${{ inputs.python-requirements }}"
+
+      - name: Install shell lint tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -x tools/setup/install-shellcheck ]]; then
+            tools/setup/install-shellcheck
+          fi
+          if [[ -x tools/setup/install-shfmt ]]; then
+            tools/setup/install-shfmt
+          fi
+
+      - name: Fetch main for comparison
+        if: inputs.fetch-main
+        run: git fetch origin main
+
+      - name: Run repository lint command
+        run: ${{ inputs.lint-command }}
