@@ -16,7 +16,7 @@ Pull-request jobs that execute untrusted fork code must not authenticate to Infi
 
 The shared deployment workflow is deliberately restrictive. It only accepts the `deploy` branch, validates the application slug, binds supported caller repositories to the application they are allowed to deploy, serialises same-application deployments, and always checks out `adb-software-solutions/adb-deploy@main` rather than a caller-selected deployment repository or ref.
 
-Before production application onboarding, the corresponding Infisical OIDC binding must also constrain `job_workflow_ref` to the approved reusable workflow release. This makes the central workflow implementation part of the authentication policy rather than relying only on repository and branch claims.
+Before production application onboarding, the corresponding Infisical OIDC binding must also constrain `job_workflow_ref` to the approved reusable workflow release. Once a release reference has been chosen, the Terraform-managed OIDC policy is part of the deployment security boundary and must be updated deliberately when that trusted workflow reference changes.
 
 ## Reporting
 
