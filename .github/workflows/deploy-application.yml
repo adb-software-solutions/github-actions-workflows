@@ -21,12 +21,6 @@ on:
       infisical-api-url:
         type: string
         default: https://secrets.adbsoftwaresolutions.co.uk
-      deploy-repository:
-        type: string
-        default: adb-software-solutions/adb-deploy
-      deploy-repository-ref:
-        type: string
-        default: main
       ssh-host:
         type: string
         default: 206.189.28.66
@@ -42,13 +36,24 @@ jobs:
   deploy:
     name: Deploy ${{ inputs.application }}
     runs-on: ubuntu-latest
+    concurrency:
+      group: adb-deploy-${{ inputs.application }}
+      cancel-in-progress: false
     steps:
-      - name: Require trusted deployment ref
+      - name: Validate deployment request
         shell: bash
+        env:
+          APPLICATION: ${{ inputs.application }}
         run: |
           set -euo pipefail
+
           if [[ "${GITHUB_REF}" != "refs/heads/deploy" ]]; then
             echo "This reusable deployment workflow may only run from the deploy branch." >&2
+            exit 1
+          fi
+
+          if [[ ! "${APPLICATION}" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+            echo "Application names must contain only lowercase letters, numbers, and hyphens." >&2
             exit 1
           fi
 
@@ -89,6 +94,8 @@ jobs:
           ssh_key="$(infisical secrets get DEPLOY_SSH_KEY \
             --projectId="${{ inputs.infisical-deployment-bootstrap-project-id }}" \
             --env=prod --path=/ssh --plain --silent)"
+          test -n "${repo_pat}"
+          test -n "${ssh_key}"
           echo "::add-mask::${repo_pat}"
           echo "::add-mask::${ssh_key}"
           {
@@ -103,8 +110,8 @@ jobs:
       - name: Checkout deployment repository
         uses: actions/checkout@v4
         with:
-          repository: ${{ inputs.deploy-repository }}
-          ref: ${{ inputs.deploy-repository-ref }}
+          repository: adb-software-solutions/adb-deploy
+          ref: main
           token: ${{ steps.bootstrap.outputs.repo-pat }}
           path: adb-deploy
 
@@ -138,6 +145,7 @@ jobs:
           cloudflare_token="$(infisical secrets get CLOUDFLARE_API_TOKEN \
             --projectId="${{ inputs.infisical-infrastructure-project-id }}" \
             --env=prod --path=/cloudflare --plain --silent)"
+          test -n "${cloudflare_token}"
           echo "::add-mask::${cloudflare_token}"
 
           jq --arg app "${APPLICATION}" \
