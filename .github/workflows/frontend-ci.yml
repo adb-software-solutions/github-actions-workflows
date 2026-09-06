@@ -116,9 +116,11 @@ jobs:
             --data-urlencode "jwt=${oidc_token}" | jq -r '.accessToken')"
           test -n "${access_token}" && test "${access_token}" != "null"
           echo "::add-mask::${access_token}"
-          echo "INFISICAL_API_URL=${INFISICAL_API_URL}" >> "$GITHUB_ENV"
-          echo "INFISICAL_TOKEN=${access_token}" >> "$GITHUB_ENV"
-          echo "INFISICAL_DISABLE_UPDATE_CHECK=true" >> "$GITHUB_ENV"
+          {
+            echo "INFISICAL_API_URL=${INFISICAL_API_URL}"
+            echo "INFISICAL_TOKEN=${access_token}"
+            echo "INFISICAL_DISABLE_UPDATE_CHECK=true"
+          } >> "$GITHUB_ENV"
           echo "authenticated=true" >> "$GITHUB_OUTPUT"
 
       - name: Run tests with Infisical
