@@ -124,20 +124,16 @@ jobs:
           repo_pat="$(infisical secrets get DEPLOY_REPO_PAT \
             --projectId="${{ inputs.infisical-deployment-bootstrap-project-id }}" \
             --env=prod --path=/github --plain --silent)"
-          ssh_key="$(infisical secrets get DEPLOY_SSH_KEY \
+          ssh_key_base64="$(infisical secrets get DEPLOY_SSH_KEY \
             --projectId="${{ inputs.infisical-deployment-bootstrap-project-id }}" \
-            --env=prod --path=/ssh --plain --silent)"
+            --env=prod --path=/ssh --plain --silent | base64 -w 0)"
           test -n "${repo_pat}"
-          test -n "${ssh_key}"
+          test -n "${ssh_key_base64}"
           echo "::add-mask::${repo_pat}"
-          echo "::add-mask::${ssh_key}"
+          echo "::add-mask::${ssh_key_base64}"
           {
-            echo "repo-pat<<ADB_EOF"
-            echo "${repo_pat}"
-            echo "ADB_EOF"
-            echo "ssh-key<<ADB_EOF"
-            echo "${ssh_key}"
-            echo "ADB_EOF"
+            echo "repo-pat=${repo_pat}"
+            echo "ssh-key-base64=${ssh_key_base64}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Checkout deployment repository
@@ -151,11 +147,11 @@ jobs:
       - name: Configure SSH
         shell: bash
         env:
-          DEPLOY_SSH_KEY: ${{ steps.bootstrap.outputs.ssh-key }}
+          DEPLOY_SSH_KEY_BASE64: ${{ steps.bootstrap.outputs.ssh-key-base64 }}
         run: |
           set -euo pipefail
           install -d -m 0700 ~/.ssh
-          printf '%s\n' "${DEPLOY_SSH_KEY}" > ~/.ssh/id_ed25519
+          printf '%s' "${DEPLOY_SSH_KEY_BASE64}" | base64 --decode > ~/.ssh/id_ed25519
           chmod 0600 ~/.ssh/id_ed25519
           ssh-keyscan -p "${{ inputs.ssh-port }}" "${{ inputs.ssh-host }}" >> ~/.ssh/known_hosts
 
@@ -181,9 +177,31 @@ jobs:
           test -n "${cloudflare_token}"
           echo "::add-mask::${cloudflare_token}"
 
-          jq --arg app "${APPLICATION}" \
-            'with_entries(.key = ($app + "_" + (.key | ascii_downcase)))' \
-            "${app_json}" > "${vars_json}"
+          jq --arg app "${APPLICATION}" '
+            if type == "object" then
+              with_entries(
+                if (.key | type) != "string" then
+                  error("Infisical JSON object contains a non-string secret key")
+                else
+                  .key = ($app + "_" + (.key | ascii_downcase))
+                end
+              )
+            elif type == "array" then
+              reduce .[] as $secret ({};
+                if ($secret | type) != "object" then
+                  error("Infisical JSON array contains a non-object entry")
+                elif ($secret.key? | type) == "string" then
+                  .[$app + "_" + ($secret.key | ascii_downcase)] = $secret.value
+                elif ($secret.secretKey? | type) == "string" then
+                  .[$app + "_" + ($secret.secretKey | ascii_downcase)] = $secret.secretValue
+                else
+                  error("Infisical JSON entry does not contain a supported secret key field")
+                end
+              )
+            else
+              error("Infisical JSON export must be an object or array")
+            end
+          ' "${app_json}" > "${vars_json}"
 
           jq --arg token "${cloudflare_token}" \
             '. + {cloudflare_api_token: $token}' \
