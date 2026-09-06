@@ -4,7 +4,7 @@ This repository is intentionally public. It contains reusable GitHub Actions wor
 
 ## Security model
 
-Sensitive workflows authenticate to Infisical with GitHub OIDC. The machine identity and project IDs passed to a workflow are identifiers, not credentials. Infisical remains responsible for authorising the calling repository, event, ref, and approved reusable workflow claims before issuing a short-lived access token.
+Sensitive workflows authenticate to Infisical with GitHub OIDC. Machine identity IDs and project IDs passed to a workflow are identifiers, not credentials. Infisical remains responsible for authorising the calling repository, event/ref, and approved reusable workflow before issuing a short-lived access token.
 
 Application repositories must grant only the permissions required by the called workflow. Jobs that use Infisical require `contents: read` and `id-token: write`; workflows that do not use OIDC should not request `id-token: write`.
 
@@ -14,7 +14,9 @@ Pull-request jobs that execute untrusted fork code must not authenticate to Infi
 
 ## Deployment trust
 
-Deployment is restricted to callers running from `refs/heads/deploy`. Before production application onboarding, the Infisical OIDC bindings should also constrain `job_workflow_ref` to the approved reusable workflow release so an application deployment identity cannot be used through an arbitrary workflow implementation.
+The shared deployment workflow is deliberately restrictive. It only accepts the `deploy` branch, validates the application slug, binds supported caller repositories to the application they are allowed to deploy, serialises same-application deployments, and always checks out `adb-software-solutions/adb-deploy@main` rather than a caller-selected deployment repository or ref.
+
+Before production application onboarding, the corresponding Infisical OIDC binding must also constrain `job_workflow_ref` to the approved reusable workflow release. This makes the central workflow implementation part of the authentication policy rather than relying only on repository and branch claims.
 
 ## Reporting
 
