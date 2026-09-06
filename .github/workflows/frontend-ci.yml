@@ -53,20 +53,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up pnpm from project metadata
         if: inputs.pnpm-version == ''
-        uses: pnpm/action-setup@v4.1.0
+        uses: pnpm/action-setup@v6
 
       - name: Set up explicit pnpm version
         if: inputs.pnpm-version != ''
-        uses: pnpm/action-setup@v4.1.0
+        uses: pnpm/action-setup@v6
         with:
           version: ${{ inputs.pnpm-version }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ inputs.node-version }}
           cache: pnpm
