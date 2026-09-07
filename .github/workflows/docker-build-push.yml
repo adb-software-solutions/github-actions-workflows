@@ -26,7 +26,11 @@ on:
         type: string
         default: ""
       build-arg-keys:
-        description: JSON array of non-sensitive application values to pass as Docker build args.
+        description: JSON array of required non-sensitive application values to pass as Docker build args.
+        type: string
+        default: "[]"
+      optional-build-arg-keys:
+        description: JSON array of optional non-sensitive application values to pass as Docker build args when present and non-empty.
         type: string
         default: "[]"
       build-env-file:
@@ -34,7 +38,11 @@ on:
         type: string
         default: ""
       build-env-keys:
-        description: JSON array of non-sensitive application values written to build-env-file.
+        description: JSON array of required non-sensitive application values written to build-env-file.
+        type: string
+        default: "[]"
+      optional-build-env-keys:
+        description: JSON array of optional non-sensitive application values written to build-env-file when present and non-empty.
         type: string
         default: "[]"
       infisical-api-url:
@@ -105,7 +113,9 @@ jobs:
         shell: bash
         env:
           BUILD_ARG_KEYS: ${{ inputs.build-arg-keys }}
+          OPTIONAL_BUILD_ARG_KEYS: ${{ inputs.optional-build-arg-keys }}
           BUILD_ENV_KEYS: ${{ inputs.build-env-keys }}
+          OPTIONAL_BUILD_ENV_KEYS: ${{ inputs.optional-build-env-keys }}
           BUILD_ENV_FILE: ${{ inputs.build-env-file }}
         run: |
           set -euo pipefail
@@ -122,6 +132,17 @@ jobs:
             printf '%s\0%s\0' "--build-arg" "${key}=${value}" >> "${args_file}"
           done < <(jq -r '.[]' <<< "${BUILD_ARG_KEYS}")
 
+          while IFS= read -r key; do
+            [[ -z "${key}" ]] && continue
+            value=""
+            if value="$(infisical secrets get "${key}" \
+              --projectId="${{ inputs.infisical-application-project-id }}" \
+              --env=prod --path=/ --plain --silent 2>/dev/null)" && [[ -n "${value}" ]]; then
+              echo "::add-mask::${value}"
+              printf '%s\0%s\0' "--build-arg" "${key}=${value}" >> "${args_file}"
+            fi
+          done < <(jq -r '.[]' <<< "${OPTIONAL_BUILD_ARG_KEYS}")
+
           if [[ -n "${BUILD_ENV_FILE}" ]]; then
             mkdir -p "$(dirname "${BUILD_ENV_FILE}")"
             umask 077
@@ -135,6 +156,17 @@ jobs:
               echo "::add-mask::${value}"
               printf '%s=%s\n' "${key}" "${value}" >> "${BUILD_ENV_FILE}"
             done < <(jq -r '.[]' <<< "${BUILD_ENV_KEYS}")
+
+            while IFS= read -r key; do
+              [[ -z "${key}" ]] && continue
+              value=""
+              if value="$(infisical secrets get "${key}" \
+                --projectId="${{ inputs.infisical-application-project-id }}" \
+                --env=prod --path=/ --plain --silent 2>/dev/null)" && [[ -n "${value}" ]]; then
+                echo "::add-mask::${value}"
+                printf '%s=%s\n' "${key}" "${value}" >> "${BUILD_ENV_FILE}"
+              fi
+            done < <(jq -r '.[]' <<< "${OPTIONAL_BUILD_ENV_KEYS}")
           fi
 
           echo "args-file=${args_file}" >> "$GITHUB_OUTPUT"
