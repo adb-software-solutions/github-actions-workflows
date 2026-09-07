@@ -27,10 +27,16 @@ on:
       run-build:
         type: boolean
         default: true
+      upload-codecov-bundle:
+        type: boolean
+        default: false
       infisical-identity-id:
         type: string
         default: ""
       infisical-project-id:
+        type: string
+        default: ""
+      infisical-codecov-project-id:
         type: string
         default: ""
       infisical-environment:
@@ -152,3 +158,27 @@ jobs:
         if: inputs.run-build && steps.infisical-auth.outputs.authenticated != 'true'
         working-directory: ${{ inputs.working-directory }}
         run: ${{ inputs.build-command }}
+
+      - name: Read Codecov token
+        id: codecov
+        if: inputs.upload-codecov-bundle && steps.infisical-auth.outputs.authenticated == 'true' && inputs.infisical-codecov-project-id != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          token="$(infisical secrets get CODECOV_TOKEN \
+            --projectId="${{ inputs.infisical-codecov-project-id }}" \
+            --env=dev --path=/ --plain --silent)"
+          test -n "${token}"
+          echo "::add-mask::${token}"
+          echo "token=${token}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload bundle analysis to Codecov
+        if: inputs.upload-codecov-bundle && steps.codecov.outputs.token != ''
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ steps.codecov.outputs.token }}
+          plugin: bundler
+          flags: website
+          name: Website Bundle Analysis
+          directory: ./${{ inputs.working-directory }}/.next
+          fail_ci_if_error: false
