@@ -9,6 +9,9 @@ on:
       image-tag:
         type: string
         default: latest
+      ansible-extra-vars-json:
+        type: string
+        default: "{}"
       infisical-identity-id:
         type: string
         required: true
@@ -136,11 +139,13 @@ jobs:
         shell: bash
         env:
           APPLICATION: ${{ inputs.application }}
+          EXTRA_VARS_JSON: ${{ inputs.ansible-extra-vars-json }}
         run: |
           set -euo pipefail
           app_json="${RUNNER_TEMP}/application-secrets.json"
+          extra_json="${RUNNER_TEMP}/deployment-extra-vars.json"
           vars_json="${RUNNER_TEMP}/ansible-extra-vars.json"
-          trap 'rm -f "${app_json}"' EXIT
+          trap 'rm -f "${app_json}" "${extra_json}"' EXIT
 
           infisical export \
             --projectId="${{ inputs.infisical-application-project-id }}" \
@@ -183,6 +188,12 @@ jobs:
             '. + {cloudflare_api_token: $token}' \
             "${vars_json}" > "${vars_json}.tmp"
           mv "${vars_json}.tmp" "${vars_json}"
+
+          printf '%s' "${EXTRA_VARS_JSON}" > "${extra_json}"
+          jq -e 'type == "object"' "${extra_json}" >/dev/null
+          jq -s '.[0] * .[1]' "${vars_json}" "${extra_json}" > "${vars_json}.tmp"
+          mv "${vars_json}.tmp" "${vars_json}"
+
           chmod 0600 "${vars_json}"
           echo "path=${vars_json}" >> "$GITHUB_OUTPUT"
 
