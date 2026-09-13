@@ -54,8 +54,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ "${GITHUB_REF}" != "refs/heads/deploy" ]]; then
-            echo "This reusable deployment workflow may only run from the deploy branch." >&2
+          if [[ "${GITHUB_REPOSITORY}" == "adb-software-solutions/external-app-deployments" ]]; then
+            expected_ref="refs/heads/main"
+          else
+            expected_ref="refs/heads/deploy"
+          fi
+
+          if [[ "${GITHUB_REF}" != "${expected_ref}" ]]; then
+            echo "This reusable deployment workflow may only run from ${expected_ref}." >&2
             exit 1
           fi
 
