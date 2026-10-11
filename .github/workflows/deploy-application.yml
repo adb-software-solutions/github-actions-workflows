@@ -221,7 +221,9 @@ jobs:
           audience: ${{ steps.iac.outputs.audience }}
           tags: ${{ steps.iac.outputs.tag }}
           hostname: gha-deploy-${{ inputs.application }}-${{ github.run_id }}-${{ github.run_attempt }}
-          args: --accept-dns=true --accept-routes=false
+          # The action always passes --accept-routes; repeating it makes
+          # `tailscale up` fail. Routes are turned off in the next step.
+          args: --accept-dns=true
 
       - name: Configure SSH (adb-iac)
         if: steps.target.outputs.generation == 'iac'
@@ -231,6 +233,7 @@ jobs:
           SECRET: ${{ steps.iac.outputs.secret }}
         run: |
           set -euo pipefail
+          sudo tailscale set --accept-routes=false
           install -d -m 0700 ~/.ssh
           umask 077
           infisical secrets get "${SECRET}" --projectId="${BOOTSTRAP_PROJECT}" \
