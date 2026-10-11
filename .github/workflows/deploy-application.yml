@@ -129,7 +129,40 @@ jobs:
           token: ${{ steps.bootstrap.outputs.repo-pat }}
           path: adb-deploy
 
+      # Legacy hosts are listed in adb-deploy's static hosts.ini and keep the
+      # original path below. Any other host must be a new-generation (adb-iac)
+      # deploy target from the published deploy inventory.
+      - name: Resolve deployment target
+        id: target
+        shell: bash
+        env:
+          APPLICATION: ${{ inputs.application }}
+          EXTRA_VARS_JSON: ${{ inputs.ansible-extra-vars-json }}
+        run: |
+          set -euo pipefail
+          definition="adb-deploy/vars/applications/${APPLICATION}.yml"
+          test -f "${definition}"
+          host="$(printf '%s' "${EXTRA_VARS_JSON}" | jq -r '.application_host_override // empty')"
+          if [[ -z "${host}" ]]; then
+            host="$(yq -r '.application.host' "${definition}")"
+          fi
+          if [[ ! "${host}" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+            echo "Application host '${host}' is not a valid inventory name." >&2
+            exit 1
+          fi
+          if grep -Eq "^${host}([[:space:]]|$)" adb-deploy/inventories/production/hosts.ini; then
+            generation=legacy
+          else
+            generation=iac
+          fi
+          echo "Deploying to ${host} (${generation})."
+          {
+            echo "host=${host}"
+            echo "generation=${generation}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Configure SSH
+        if: steps.target.outputs.generation == 'legacy'
         shell: bash
         env:
           DEPLOY_SSH_KEY_BASE64: ${{ steps.bootstrap.outputs.ssh-key-base64 }}
@@ -139,6 +172,71 @@ jobs:
           printf '%s' "${DEPLOY_SSH_KEY_BASE64}" | base64 --decode > ~/.ssh/id_ed25519
           chmod 0600 ~/.ssh/id_ed25519
           ssh-keyscan -p "${{ inputs.ssh-port }}" "${{ inputs.ssh-host }}" >> ~/.ssh/known_hosts
+
+      - name: Load the adb-iac deploy inventory
+        id: iac
+        if: steps.target.outputs.generation == 'iac'
+        shell: bash
+        env:
+          BOOTSTRAP_PROJECT: ${{ inputs.infisical-deployment-bootstrap-project-id }}
+          HOST: ${{ steps.target.outputs.host }}
+        run: |
+          set -euo pipefail
+          read_secret() {
+            infisical secrets get "$2" --projectId="${BOOTSTRAP_PROJECT}" \
+              --env=prod --path="$1" --plain --silent
+          }
+          IAC_INVENTORY_ACCESS_KEY_ID="$(read_secret /r2 IAC_INVENTORY_ACCESS_KEY_ID)"
+          IAC_INVENTORY_SECRET_ACCESS_KEY="$(read_secret /r2 IAC_INVENTORY_SECRET_ACCESS_KEY)"
+          echo "::add-mask::${IAC_INVENTORY_SECRET_ACCESS_KEY}"
+          IAC_INVENTORY_ENDPOINT="$(read_secret /r2 IAC_INVENTORY_ENDPOINT)"
+          IAC_INVENTORY_BUCKET="$(read_secret /r2 IAC_INVENTORY_BUCKET)"
+          export IAC_INVENTORY_ACCESS_KEY_ID IAC_INVENTORY_SECRET_ACCESS_KEY IAC_INVENTORY_ENDPOINT IAC_INVENTORY_BUCKET
+
+          dir="${RUNNER_TEMP}/iac-inventory"
+          adb-deploy/scripts/fetch-iac-inventory.sh "${dir}"
+          inventory="${dir}/inventory.json"
+          if ! jq -e --arg h "${HOST}" '.hosts[$h]' "${inventory}" >/dev/null; then
+            reason="$(jq -r --arg h "${HOST}" '.pending[$h] // "not in the adb-iac deploy inventory"' "${inventory}")"
+            echo "${HOST} is not deployable: ${reason}" >&2
+            exit 1
+          fi
+          pool="$(jq -r --arg h "${HOST}" '.hosts[$h].pool' "${inventory}")"
+          jq -e --arg p "${pool}" '.pools[$p].tailscale_client_id' "${inventory}" >/dev/null
+          {
+            echo "dir=${dir}"
+            echo "pool=${pool}"
+            echo "secret=IAC_DEPLOY_SSH_KEY_$(tr 'a-z-' 'A-Z_' <<<"${pool}")"
+            jq -r --arg p "${pool}" '.pools[$p] |
+              "client-id=\(.tailscale_client_id)", "audience=\(.tailscale_audience)", "tag=\(.runner_tag)"' "${inventory}"
+          } >> "$GITHUB_OUTPUT"
+
+      # The pool's trust credential only issues this tag to the callers it is
+      # bound to, and the tag only reaches that pool's hosts on SSH.
+      - name: Join the tailnet as the pool's deploy runner
+        if: steps.target.outputs.generation == 'iac'
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ steps.iac.outputs.client-id }}
+          audience: ${{ steps.iac.outputs.audience }}
+          tags: ${{ steps.iac.outputs.tag }}
+          hostname: gha-deploy-${{ inputs.application }}-${{ github.run_id }}-${{ github.run_attempt }}
+          args: --accept-dns=true --accept-routes=false
+
+      - name: Configure SSH (adb-iac)
+        if: steps.target.outputs.generation == 'iac'
+        shell: bash
+        env:
+          BOOTSTRAP_PROJECT: ${{ inputs.infisical-deployment-bootstrap-project-id }}
+          SECRET: ${{ steps.iac.outputs.secret }}
+        run: |
+          set -euo pipefail
+          install -d -m 0700 ~/.ssh
+          umask 077
+          infisical secrets get "${SECRET}" --projectId="${BOOTSTRAP_PROJECT}" \
+            --env=prod --path=/ssh --plain --silent > ~/.ssh/id_ed25519
+          test -s ~/.ssh/id_ed25519
+          # Host keys come only from the published inventory (strict checking).
 
       - name: Build Ansible variables from Infisical
         id: ansible-vars
@@ -213,9 +311,15 @@ jobs:
       - name: Deploy application and infrastructure
         working-directory: adb-deploy
         shell: bash
+        env:
+          IAC_INVENTORY_DIR: ${{ steps.iac.outputs.dir }}
         run: |
           set -euo pipefail
-          ansible-playbook deploy_application.yml \
+          inventories=()
+          if [[ -n "${IAC_INVENTORY_DIR}" ]]; then
+            inventories=(-i inventories/production/hosts.ini -i "${IAC_INVENTORY_DIR}/iac_hosts.yml")
+          fi
+          ansible-playbook "${inventories[@]}" deploy_application.yml \
             --extra-vars "application_name=${{ inputs.application }}" \
             --extra-vars "deployment_image_tag=${{ inputs.image-tag }}" \
             --extra-vars "@${{ steps.ansible-vars.outputs.path }}"
@@ -225,3 +329,4 @@ jobs:
         run: |
           rm -f "${{ steps.ansible-vars.outputs.path }}"
           rm -f ~/.ssh/id_ed25519
+          rm -rf "${RUNNER_TEMP}/iac-inventory"
