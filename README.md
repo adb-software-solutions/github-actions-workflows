@@ -104,6 +104,28 @@ The initial repository/application bindings are CreatorClerk, TechWiki, Reseller
 
 The repository/application binding is intentionally explicit for the first release. Longer term, it should be generated or validated from the same application catalogue used by `adb-deploy` so there is only one authoritative mapping.
 
+## Deployment targets
+
+The target host is the application's `host` in its `adb-deploy` definition (or
+`application_host_override` passed in `ansible-extra-vars-json`).
+
+- **Legacy hosts** (listed in `adb-deploy/inventories/production/hosts.ini`)
+  use the original path: public SSH, `ssh-host`/`ssh-port` inputs and the
+  shared `DEPLOY_SSH_KEY`. This path is unchanged.
+- **New-generation hosts** (built by `adb-iac`) are resolved from the adb-iac
+  deploy inventory (`adb-deploy/scripts/fetch-iac-inventory.sh`, read-only
+  credentials from `adb-deployment-bootstrap /r2`). The job then:
+  - joins the tailnet through Tailscale workload identity federation, using
+    the host's deploy pool credential. That credential is bound to the
+    callers allowed to deploy to the pool, so other repositories cannot
+    obtain the pool's runner tag;
+  - connects as `deploy` on port 22 with the pool's own key
+    (`IAC_DEPLOY_SSH_KEY_<POOL>`), trusting only the published, pinned host
+    keys (no `ssh-keyscan`);
+  - refuses hosts the inventory lists as pending, and shows the reason.
+
+See adb-iac `docs/DEPLOY-INVENTORY.md` for pools and the inventory format.
+
 ## Deployment secret mapping
 
 `deploy-application.yml` deliberately avoids application-specific secret maps. Application secrets are read from the application's Infisical project and converted to Ansible extra-vars by convention:
