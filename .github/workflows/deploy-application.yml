@@ -33,6 +33,13 @@ on:
       ssh-port:
         type: number
         default: 1999
+      migrate:
+        description: >-
+          One-off move from the application's migration.from_host (a legacy
+          host) to its adb-iac host: stops it there, copies its databases and
+          deploys it on the new host, including DNS.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -138,6 +145,7 @@ jobs:
         env:
           APPLICATION: ${{ inputs.application }}
           EXTRA_VARS_JSON: ${{ inputs.ansible-extra-vars-json }}
+          MIGRATE: ${{ inputs.migrate }}
         run: |
           set -euo pipefail
           definition="adb-deploy/vars/applications/${APPLICATION}.yml"
@@ -161,6 +169,26 @@ jobs:
             echo "generation=${generation}"
           } >> "$GITHUB_OUTPUT"
 
+          if [[ "${MIGRATE}" == true ]]; then
+            source="$(yq -r '.application.migration.from_host // ""' "${definition}")"
+            if [[ "${generation}" != iac || ! "${source}" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+              echo "Migration needs an adb-iac target and application.migration.from_host." >&2
+              exit 1
+            fi
+            line="$(grep -E "^${source}[[:space:]]" adb-deploy/inventories/production/hosts.ini || true)"
+            address="$(sed -nE 's/.*ansible_host=([0-9.]+).*/\1/p' <<<"${line}")"
+            port="$(sed -nE 's/.*ansible_port=([0-9]+).*/\1/p' <<<"${line}")"
+            if [[ -z "${address}" ]]; then
+              echo "Migration source ${source} is not a legacy host in hosts.ini." >&2
+              exit 1
+            fi
+            echo "Migrating from ${source} (${address}:${port:-22})."
+            {
+              echo "source-address=${address}"
+              echo "source-port=${port:-22}"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Configure SSH
         if: steps.target.outputs.generation == 'legacy'
         shell: bash
@@ -172,6 +200,23 @@ jobs:
           printf '%s' "${DEPLOY_SSH_KEY_BASE64}" | base64 --decode > ~/.ssh/id_ed25519
           chmod 0600 ~/.ssh/id_ed25519
           ssh-keyscan -p "${{ inputs.ssh-port }}" "${{ inputs.ssh-host }}" >> ~/.ssh/known_hosts
+
+      # The legacy source uses its own key file so it never clashes with the
+      # adb-iac pool key (~/.ssh/id_ed25519).
+      - name: Configure SSH to the migration source
+        if: inputs.migrate
+        shell: bash
+        env:
+          DEPLOY_SSH_KEY_BASE64: ${{ steps.bootstrap.outputs.ssh-key-base64 }}
+          ADDRESS: ${{ steps.target.outputs.source-address }}
+          PORT: ${{ steps.target.outputs.source-port }}
+        run: |
+          set -euo pipefail
+          install -d -m 0700 ~/.ssh
+          umask 077
+          printf '%s' "${DEPLOY_SSH_KEY_BASE64}" | base64 --decode > ~/.ssh/id_legacy
+          ssh-keyscan -p "${PORT}" "${ADDRESS}" >> ~/.ssh/known_hosts
+          printf 'Host %s\n  IdentityFile ~/.ssh/id_legacy\n  IdentitiesOnly yes\n' "${ADDRESS}" >> ~/.ssh/config
 
       - name: Load the adb-iac deploy inventory
         id: iac
@@ -324,6 +369,7 @@ jobs:
           fi
           ansible-playbook "${inventories[@]}" deploy_application.yml \
             --extra-vars "application_name=${{ inputs.application }}" \
+            --extra-vars '{"application_migrate": ${{ inputs.migrate }}}' \
             --extra-vars "deployment_image_tag=${{ inputs.image-tag }}" \
             --extra-vars "@${{ steps.ansible-vars.outputs.path }}"
 
@@ -331,5 +377,6 @@ jobs:
         if: always()
         run: |
           rm -f "${{ steps.ansible-vars.outputs.path }}"
-          rm -f ~/.ssh/id_ed25519
+          rm -f ~/.ssh/id_ed25519 ~/.ssh/id_legacy ~/.ssh/config
+          rm -rf "${RUNNER_TEMP}/adb-migration"
           rm -rf "${RUNNER_TEMP}/iac-inventory"
