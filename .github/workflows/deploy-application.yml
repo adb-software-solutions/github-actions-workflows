@@ -27,21 +27,6 @@ on:
       infisical-api-url:
         type: string
         default: https://secrets.adbsoftwaresolutions.co.uk
-      ssh-host:
-        type: string
-        default: 206.189.28.66
-      ssh-port:
-        type: number
-        default: 1999
-      migrate:
-        description: >-
-          Explicitly move the application from its migration.from_host (a
-          legacy host) to its adb-iac host: stops it there, copies its
-          databases and media and deploys it on the new host, including DNS.
-          Not needed for a first deploy to the new host: adb-deploy migrates
-          automatically while the target does not hold the application yet.
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -118,17 +103,9 @@ jobs:
           repo_pat="$(infisical secrets get DEPLOY_REPO_PAT \
             --projectId="${{ inputs.infisical-deployment-bootstrap-project-id }}" \
             --env=prod --path=/github --plain --silent)"
-          ssh_key_base64="$(infisical secrets get DEPLOY_SSH_KEY \
-            --projectId="${{ inputs.infisical-deployment-bootstrap-project-id }}" \
-            --env=prod --path=/ssh --plain --silent | base64 -w 0)"
           test -n "${repo_pat}"
-          test -n "${ssh_key_base64}"
           echo "::add-mask::${repo_pat}"
-          echo "::add-mask::${ssh_key_base64}"
-          {
-            echo "repo-pat=${repo_pat}"
-            echo "ssh-key-base64=${ssh_key_base64}"
-          } >> "$GITHUB_OUTPUT"
+          echo "repo-pat=${repo_pat}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout deployment repository
         uses: actions/checkout@v7
@@ -138,16 +115,14 @@ jobs:
           token: ${{ steps.bootstrap.outputs.repo-pat }}
           path: adb-deploy
 
-      # Legacy hosts are listed in adb-deploy's static hosts.ini and keep the
-      # original path below. Any other host must be a new-generation (adb-iac)
-      # deploy target from the published deploy inventory.
+      # Every host is a new-generation (adb-iac) deploy target from the
+      # published deploy inventory; the legacy (port 1999) hosts are retired.
       - name: Resolve deployment target
         id: target
         shell: bash
         env:
           APPLICATION: ${{ inputs.application }}
           EXTRA_VARS_JSON: ${{ inputs.ansible-extra-vars-json }}
-          MIGRATE: ${{ inputs.migrate }}
         run: |
           set -euo pipefail
           definition="adb-deploy/vars/applications/${APPLICATION}.yml"
@@ -160,77 +135,11 @@ jobs:
             echo "Application host '${host}' is not a valid inventory name." >&2
             exit 1
           fi
-          if grep -Eq "^${host}([[:space:]]|$)" adb-deploy/inventories/production/hosts.ini; then
-            generation=legacy
-          else
-            generation=iac
-          fi
-          echo "Deploying to ${host} (${generation})."
-          {
-            echo "host=${host}"
-            echo "generation=${generation}"
-          } >> "$GITHUB_OUTPUT"
-
-          # adb-deploy migrates automatically when the definition names a
-          # migration.from_host and the target does not hold the application
-          # yet, so the runner needs the source whenever one is named (and
-          # whenever a migration is asked for explicitly).
-          source="$(yq -r '.application.migration.from_host // ""' "${definition}")"
-          if [[ "${MIGRATE}" == true || -n "${source}" ]]; then
-            if [[ "${generation}" != iac || ! "${source}" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
-              echo "Migration needs an adb-iac target and application.migration.from_host." >&2
-              exit 1
-            fi
-            line="$(grep -E "^${source}[[:space:]]" adb-deploy/inventories/production/hosts.ini || true)"
-            address="$(sed -nE 's/.*ansible_host=([0-9.]+).*/\1/p' <<<"${line}")"
-            port="$(sed -nE 's/.*ansible_port=([0-9]+).*/\1/p' <<<"${line}")"
-            if [[ -z "${address}" ]]; then
-              echo "Migration source ${source} is not a legacy host in hosts.ini." >&2
-              exit 1
-            fi
-            echo "Migration source ${source} (${address}:${port:-22})."
-            {
-              echo "source-address=${address}"
-              echo "source-port=${port:-22}"
-            } >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Configure SSH
-        if: steps.target.outputs.generation == 'legacy'
-        shell: bash
-        env:
-          DEPLOY_SSH_KEY_BASE64: ${{ steps.bootstrap.outputs.ssh-key-base64 }}
-        run: |
-          set -euo pipefail
-          install -d -m 0700 ~/.ssh
-          printf '%s' "${DEPLOY_SSH_KEY_BASE64}" | base64 --decode > ~/.ssh/id_ed25519
-          chmod 0600 ~/.ssh/id_ed25519
-          ssh-keyscan -p "${{ inputs.ssh-port }}" "${{ inputs.ssh-host }}" >> ~/.ssh/known_hosts
-
-      # The legacy source uses its own key file so it never clashes with the
-      # adb-iac pool key (~/.ssh/id_ed25519).
-      - name: Configure SSH to the migration source
-        if: steps.target.outputs.source-address != ''
-        shell: bash
-        env:
-          DEPLOY_SSH_KEY_BASE64: ${{ steps.bootstrap.outputs.ssh-key-base64 }}
-          ADDRESS: ${{ steps.target.outputs.source-address }}
-          PORT: ${{ steps.target.outputs.source-port }}
-        run: |
-          set -euo pipefail
-          install -d -m 0700 ~/.ssh
-          umask 077
-          printf '%s' "${DEPLOY_SSH_KEY_BASE64}" | base64 --decode > ~/.ssh/id_legacy
-          # Only needed if this deploy migrates; adb-deploy decides that once
-          # it has looked at the target, so an unreachable source is not an
-          # error here.
-          ssh-keyscan -p "${PORT}" "${ADDRESS}" >> ~/.ssh/known_hosts \
-            || echo "::warning::Migration source ${ADDRESS}:${PORT} did not answer ssh-keyscan."
-          printf 'Host %s\n  IdentityFile ~/.ssh/id_legacy\n  IdentitiesOnly yes\n' "${ADDRESS}" >> ~/.ssh/config
+          echo "Deploying to ${host}."
+          echo "host=${host}" >> "$GITHUB_OUTPUT"
 
       - name: Load the adb-iac deploy inventory
         id: iac
-        if: steps.target.outputs.generation == 'iac'
         shell: bash
         env:
           BOOTSTRAP_PROJECT: ${{ inputs.infisical-deployment-bootstrap-project-id }}
@@ -269,7 +178,6 @@ jobs:
       # The pool's trust credential only issues this tag to the callers it is
       # bound to, and the tag only reaches that pool's hosts on SSH.
       - name: Join the tailnet as the pool's deploy runner
-        if: steps.target.outputs.generation == 'iac'
         uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
         with:
           oauth-client-id: ${{ steps.iac.outputs.client-id }}
@@ -281,7 +189,6 @@ jobs:
           args: --accept-dns=true
 
       - name: Configure SSH (adb-iac)
-        if: steps.target.outputs.generation == 'iac'
         shell: bash
         env:
           BOOTSTRAP_PROJECT: ${{ inputs.infisical-deployment-bootstrap-project-id }}
@@ -373,13 +280,8 @@ jobs:
           IAC_INVENTORY_DIR: ${{ steps.iac.outputs.dir }}
         run: |
           set -euo pipefail
-          inventories=()
-          if [[ -n "${IAC_INVENTORY_DIR}" ]]; then
-            inventories=(-i inventories/production/hosts.ini -i "${IAC_INVENTORY_DIR}/iac_hosts.yml")
-          fi
-          ansible-playbook "${inventories[@]}" deploy_application.yml \
+          ansible-playbook -i "${IAC_INVENTORY_DIR}/iac_hosts.yml" deploy_application.yml \
             --extra-vars "application_name=${{ inputs.application }}" \
-            --extra-vars '{"application_migrate": ${{ inputs.migrate }}}' \
             --extra-vars "deployment_image_tag=${{ inputs.image-tag }}" \
             --extra-vars "@${{ steps.ansible-vars.outputs.path }}"
 
@@ -387,6 +289,6 @@ jobs:
         if: always()
         run: |
           rm -f "${{ steps.ansible-vars.outputs.path }}"
-          rm -f ~/.ssh/id_ed25519 ~/.ssh/id_legacy ~/.ssh/config
+          rm -f ~/.ssh/id_ed25519
           rm -rf "${RUNNER_TEMP}/adb-migration"
           rm -rf "${RUNNER_TEMP}/iac-inventory"
