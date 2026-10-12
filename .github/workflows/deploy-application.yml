@@ -24,6 +24,13 @@ on:
       infisical-infrastructure-project-id:
         type: string
         required: true
+      infisical-registry-project-id:
+        description: >-
+          Shared container-registry project (adb-container-registry). Its
+          credentials log the target in before images are pulled. Deploy-only
+          applications have no access to it and deploy public images.
+        type: string
+        default: 848009f4-aa7d-45e2-8fb6-404bd8f25115
       infisical-api-url:
         type: string
         default: https://secrets.adbsoftwaresolutions.co.uk
@@ -350,6 +357,29 @@ jobs:
             '. + {cloudflare_api_token: $token}' \
             "${vars_json}" > "${vars_json}.tmp"
           mv "${vars_json}.tmp" "${vars_json}"
+
+          # Registry credentials, when this identity may read them: the target
+          # logs in before pulling private images (new-generation hosts have
+          # no standing registry login).
+          registry_user=""
+          registry_token=""
+          if [[ -n "${{ inputs.infisical-registry-project-id }}" ]]; then
+            registry_user="$(infisical secrets get DO_REGISTRY_USERNAME \
+              --projectId="${{ inputs.infisical-registry-project-id }}" \
+              --env=prod --path=/docker-registry --plain --silent 2>/dev/null || true)"
+            registry_token="$(infisical secrets get DO_REGISTRY_ACCESS_TOKEN \
+              --projectId="${{ inputs.infisical-registry-project-id }}" \
+              --env=prod --path=/docker-registry --plain --silent 2>/dev/null || true)"
+          fi
+          if [[ -n "${registry_user}" && -n "${registry_token}" ]]; then
+            echo "::add-mask::${registry_token}"
+            jq --arg user "${registry_user}" --arg token "${registry_token}" \
+              '. + {docker_registry_user: $user, docker_registry_token: $token}' \
+              "${vars_json}" > "${vars_json}.tmp"
+            mv "${vars_json}.tmp" "${vars_json}"
+          else
+            echo "No container-registry credentials for this identity; the target will not log in."
+          fi
 
           printf '%s' "${EXTRA_VARS_JSON}" > "${extra_json}"
           jq -e 'type == "object"' "${extra_json}" >/dev/null
