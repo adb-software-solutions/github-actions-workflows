@@ -35,9 +35,11 @@ on:
         default: 1999
       migrate:
         description: >-
-          One-off move from the application's migration.from_host (a legacy
-          host) to its adb-iac host: stops it there, copies its databases and
-          deploys it on the new host, including DNS.
+          Explicitly move the application from its migration.from_host (a
+          legacy host) to its adb-iac host: stops it there, copies its
+          databases and media and deploys it on the new host, including DNS.
+          Not needed for a first deploy to the new host: adb-deploy migrates
+          automatically while the target does not hold the application yet.
         type: boolean
         default: false
 
@@ -169,8 +171,12 @@ jobs:
             echo "generation=${generation}"
           } >> "$GITHUB_OUTPUT"
 
-          if [[ "${MIGRATE}" == true ]]; then
-            source="$(yq -r '.application.migration.from_host // ""' "${definition}")"
+          # adb-deploy migrates automatically when the definition names a
+          # migration.from_host and the target does not hold the application
+          # yet, so the runner needs the source whenever one is named (and
+          # whenever a migration is asked for explicitly).
+          source="$(yq -r '.application.migration.from_host // ""' "${definition}")"
+          if [[ "${MIGRATE}" == true || -n "${source}" ]]; then
             if [[ "${generation}" != iac || ! "${source}" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
               echo "Migration needs an adb-iac target and application.migration.from_host." >&2
               exit 1
@@ -182,7 +188,7 @@ jobs:
               echo "Migration source ${source} is not a legacy host in hosts.ini." >&2
               exit 1
             fi
-            echo "Migrating from ${source} (${address}:${port:-22})."
+            echo "Migration source ${source} (${address}:${port:-22})."
             {
               echo "source-address=${address}"
               echo "source-port=${port:-22}"
@@ -204,7 +210,7 @@ jobs:
       # The legacy source uses its own key file so it never clashes with the
       # adb-iac pool key (~/.ssh/id_ed25519).
       - name: Configure SSH to the migration source
-        if: inputs.migrate
+        if: steps.target.outputs.source-address != ''
         shell: bash
         env:
           DEPLOY_SSH_KEY_BASE64: ${{ steps.bootstrap.outputs.ssh-key-base64 }}
@@ -215,7 +221,11 @@ jobs:
           install -d -m 0700 ~/.ssh
           umask 077
           printf '%s' "${DEPLOY_SSH_KEY_BASE64}" | base64 --decode > ~/.ssh/id_legacy
-          ssh-keyscan -p "${PORT}" "${ADDRESS}" >> ~/.ssh/known_hosts
+          # Only needed if this deploy migrates; adb-deploy decides that once
+          # it has looked at the target, so an unreachable source is not an
+          # error here.
+          ssh-keyscan -p "${PORT}" "${ADDRESS}" >> ~/.ssh/known_hosts \
+            || echo "::warning::Migration source ${ADDRESS}:${PORT} did not answer ssh-keyscan."
           printf 'Host %s\n  IdentityFile ~/.ssh/id_legacy\n  IdentitiesOnly yes\n' "${ADDRESS}" >> ~/.ssh/config
 
       - name: Load the adb-iac deploy inventory
