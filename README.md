@@ -28,10 +28,30 @@ These are defaults, not hard requirements. Inputs exist for genuine differences 
 | --- | --- |
 | `lint.yml` | Prepare the standard Python/Node/shell toolchain and run the repository's own `tools/lint`. |
 | `django-ci.yml` | Run Django tests with PostgreSQL and Valkey, produce coverage, and optionally upload it. |
-| `frontend-ci.yml` | Install pnpm dependencies, run frontend tests, and build the frontend. |
+| `frontend-ci.yml` | Install pnpm dependencies, run frontend tests, and build the frontend, optionally against a throwaway MongoDB (`mongo: true`). |
 | `docker-build-push.yml` | Build one or more Docker images, authenticate to the ADB registry through Infisical, push, and scan them. |
 | `deploy-application.yml` | Authenticate through OIDC, obtain deployment credentials/secrets from Infisical, and invoke `adb-deploy`. |
 | `devcontainer-ci.yml` | Build a repository devcontainer as a CI smoke test. |
+
+## MongoDB in frontend CI
+
+`frontend-ci.yml` with `mongo: true` starts a throwaway MongoDB before tests
+and the build:
+- it runs `mongo-image` (default `mongo:8.0`) as a single-node replica set,
+  so transactions work, as Payload CMS needs;
+- it is published on 127.0.0.1 only and has no authentication;
+- it exports `DATABASE_URI=mongodb://127.0.0.1:27017/test?replicaSet=rs0`.
+
+`mongo-database` and `mongo-uri-env` change the database and the variable
+name. The exported URI takes precedence over the same key from Infisical, so
+a development value pointing at a devcontainer host cannot leak into CI.
+
+```yaml
+  frontend:
+    uses: adb-software-solutions/github-actions-workflows/.github/workflows/frontend-ci.yml@v1
+    with:
+      mongo: true
+```
 
 ## Caller responsibility
 

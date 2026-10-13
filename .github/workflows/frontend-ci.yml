@@ -48,6 +48,22 @@ on:
       infisical-api-url:
         type: string
         default: https://secrets.adbsoftwaresolutions.co.uk
+      # A throwaway MongoDB for tests and builds: a single-node replica set
+      # (so transactions work, as Payload CMS needs) on 127.0.0.1 only,
+      # without authentication. Its URI is exported as mongo-uri-env and
+      # takes precedence over the same key from Infisical.
+      mongo:
+        type: boolean
+        default: false
+      mongo-image:
+        type: string
+        default: "mongo:8.0"
+      mongo-database:
+        type: string
+        default: test
+      mongo-uri-env:
+        type: string
+        default: DATABASE_URI
 
 permissions:
   contents: read
@@ -81,6 +97,40 @@ jobs:
       - name: Install dependencies
         working-directory: ${{ inputs.working-directory }}
         run: pnpm install --frozen-lockfile
+
+      - name: Start MongoDB
+        if: inputs.mongo
+        shell: bash
+        env:
+          MONGO_IMAGE: ${{ inputs.mongo-image }}
+          MONGO_DATABASE: ${{ inputs.mongo-database }}
+          MONGO_URI_ENV: ${{ inputs.mongo-uri-env }}
+        run: |
+          set -euo pipefail
+          [[ "${MONGO_URI_ENV}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { echo "::error::mongo-uri-env is not a variable name"; exit 1; }
+          [[ "${MONGO_DATABASE}" =~ ^[A-Za-z0-9_-]{1,63}$ ]] || { echo "::error::mongo-database is not a database name"; exit 1; }
+          docker run -d --name ci-mongo -p 127.0.0.1:27017:27017 "${MONGO_IMAGE}" \
+            --replSet rs0 --bind_ip_all --wiredTigerCacheSizeGB 0.25 >/dev/null
+          mongosh() { docker exec ci-mongo mongosh --quiet --norc "$@"; }
+          for _ in $(seq 1 60); do
+            mongosh --eval 'quit(db.adminCommand({ping: 1}).ok ? 0 : 1)' >/dev/null 2>&1 && break
+            sleep 1
+          done
+          # The member is named localhost:27017, which is the same server
+          # from inside the container and from the runner.
+          mongosh --eval "rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'localhost:27017'}]})" >/dev/null
+          for _ in $(seq 1 60); do
+            mongosh --eval 'quit(db.hello().isWritablePrimary ? 0 : 1)' >/dev/null 2>&1 && break
+            sleep 1
+          done
+          mongosh --eval 'quit(db.hello().isWritablePrimary ? 0 : 1)' || { docker logs ci-mongo | tail -20; exit 1; }
+          uri="mongodb://127.0.0.1:27017/${MONGO_DATABASE}?replicaSet=rs0"
+          {
+            echo "${MONGO_URI_ENV}=${uri}"
+            # Re-applied inside `infisical run`, so it wins over Infisical.
+            echo "CI_SERVICE_ENV=${MONGO_URI_ENV}=${uri}"
+          } >> "$GITHUB_ENV"
+          echo "MongoDB ready: ${MONGO_URI_ENV}=${uri}"
 
       - name: Determine whether Infisical may be used
         id: infisical-policy
@@ -137,7 +187,7 @@ jobs:
           --projectId="${{ inputs.infisical-project-id }}"
           --env="${{ inputs.infisical-environment }}"
           --path="${{ inputs.infisical-path }}"
-          -- ${{ inputs.test-command }}
+          -- env ${CI_SERVICE_ENV:+"$CI_SERVICE_ENV"} ${{ inputs.test-command }}
 
       - name: Run tests without Infisical
         if: inputs.run-tests && steps.infisical-auth.outputs.authenticated != 'true'
@@ -152,7 +202,7 @@ jobs:
           --projectId="${{ inputs.infisical-project-id }}"
           --env="${{ inputs.infisical-environment }}"
           --path="${{ inputs.infisical-path }}"
-          -- ${{ inputs.build-command }}
+          -- env ${CI_SERVICE_ENV:+"$CI_SERVICE_ENV"} ${{ inputs.build-command }}
 
       - name: Build without Infisical
         if: inputs.run-build && steps.infisical-auth.outputs.authenticated != 'true'
