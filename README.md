@@ -43,8 +43,9 @@ and the build:
 - it exports `DATABASE_URI=mongodb://127.0.0.1:27017/test?replicaSet=rs0`.
 
 `mongo-database` and `mongo-uri-env` change the database and the variable
-name. The exported URI takes precedence over the same key from Infisical, so
-a development value pointing at a devcontainer host cannot leak into CI.
+name. The exported URI takes precedence over the same key from Infisical:
+callers that read their prod project on `main` (for build variables) would
+otherwise hand tests the production database URI.
 
 ```yaml
   frontend:
