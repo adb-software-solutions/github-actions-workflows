@@ -227,7 +227,10 @@ jobs:
           test -n "${cloudflare_token}"
           echo "::add-mask::${cloudflare_token}"
 
-          jq --arg app "${APPLICATION}" '
+          # Variables are <application>_<key>; hyphens become underscores so
+          # every name is a valid Jinja identifier (adb-web-platform ->
+          # adb_web_platform_secret_key).
+          jq --arg app "${APPLICATION//-/_}" '
             if type == "object" then
               with_entries(
                 if (.key | type) != "string" then
