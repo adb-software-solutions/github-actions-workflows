@@ -130,12 +130,12 @@ The repository/application binding is intentionally explicit for the first relea
 The target host is the application's `host` in its `adb-deploy` definition (or
 `application_host_override` passed in `ansible-extra-vars-json`).
 
-- **Legacy hosts** (listed in `adb-deploy/inventories/production/hosts.ini`)
-  use the original path: public SSH, `ssh-host`/`ssh-port` inputs and the
-  shared `DEPLOY_SSH_KEY`. This path is unchanged.
-- **New-generation hosts** (built by `adb-iac`) are resolved from the adb-iac
-  deploy inventory (`adb-deploy/scripts/fetch-iac-inventory.sh`, read-only
-  credentials from `adb-deployment-bootstrap /r2`). The job then:
+Every host is built by `adb-iac` (the legacy port-1999 hosts and their
+shared `DEPLOY_SSH_KEY` were retired in October 2026):
+
+- **Hosts** are resolved from the adb-iac deploy inventory
+  (`adb-deploy/scripts/fetch-iac-inventory.sh`, read-only credentials from
+  `adb-deployment-bootstrap /r2`). The job then:
   - joins the tailnet through Tailscale workload identity federation, using
     the host's deploy pool credential. That credential is bound to the
     callers allowed to deploy to the pool, so other repositories cannot
