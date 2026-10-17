@@ -30,7 +30,7 @@ These are defaults, not hard requirements. Inputs exist for genuine differences 
 | `django-ci.yml` | Run Django tests with PostgreSQL and Valkey, produce coverage, and optionally upload it. |
 | `frontend-ci.yml` | Install pnpm dependencies, run frontend tests, and build the frontend, optionally against a throwaway MongoDB (`mongo: true`). |
 | `docker-build-push.yml` | Build one or more Docker images, authenticate to the ADB registry through Infisical, push, and scan them. |
-| `docker-build.yml` | Build the same images as `docker-build-push.yml` without logging in to the registry or pushing, so pull requests prove their Dockerfiles still build. |
+| `docker-build-ci.yml` | Build the same images as `docker-build-push.yml` without logging in to the registry or pushing, so pull requests prove their Dockerfiles still build. |
 | `deploy-application.yml` | Authenticate through OIDC, obtain deployment credentials/secrets from Infisical, and invoke `adb-deploy`. |
 | `devcontainer-ci.yml` | Build a repository devcontainer as a CI smoke test. |
 
@@ -106,13 +106,13 @@ For pull requests from public repositories, secret-bearing jobs must not authent
 
 ## Docker build values
 
-`docker-build-push.yml` and `docker-build.yml` can read selected values from an application's Infisical project for frontend/container builds. The `build-arg-keys` and `build-env-keys` mechanisms are intended for **non-sensitive build-time configuration** such as `NEXT_PUBLIC_*` values that happen to be centrally managed in Infisical.
+`docker-build-push.yml` and `docker-build-ci.yml` can read selected values from an application's Infisical project for frontend/container builds. The `build-arg-keys` and `build-env-keys` mechanisms are intended for **non-sensitive build-time configuration** such as `NEXT_PUBLIC_*` values that happen to be centrally managed in Infisical.
 
 Do not pass passwords, private keys, access tokens, database credentials, or other sensitive values as Docker build arguments or bake them into generated dotenv files. Docker build arguments and files copied into build layers can become visible in image metadata or history. A workload that genuinely needs a sensitive build-time credential should use a BuildKit secret-based mechanism instead.
 
 Temporary build argument and generated dotenv files are removed by the workflow after the build.
 
-`docker-build.yml` takes the same inputs except the registry ones, plus `infisical-environment` (default `dev`). Infisical is optional: without `infisical-identity-id` and `infisical-application-project-id`, and always for fork pull requests, it builds with no build values. For pull requests, pass the PR identity and the CI project, and list build values as optional keys, so a value missing from `dev` doesn't fail the build:
+`docker-build-ci.yml` takes the same inputs except the registry ones, plus `infisical-environment` (default `dev`). Infisical is optional: without `infisical-identity-id` and `infisical-application-project-id`, and always for fork pull requests, it builds with no build values. For pull requests, pass the PR identity and the CI project, and list build values as optional keys, so a value missing from `dev` doesn't fail the build:
 
 ```yaml
 docker-build:
@@ -120,7 +120,7 @@ docker-build:
     permissions:
         contents: read
         id-token: write
-    uses: adb-software-solutions/github-actions-workflows/.github/workflows/docker-build.yml@v1
+    uses: adb-software-solutions/github-actions-workflows/.github/workflows/docker-build-ci.yml@v1
     with:
         application: example
         images: '["website"]'
