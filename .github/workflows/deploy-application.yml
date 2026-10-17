@@ -227,6 +227,19 @@ jobs:
           test -n "${cloudflare_token}"
           echo "::add-mask::${cloudflare_token}"
 
+          # R2 credentials for application backups (adb-deploy
+          # configure_backups). Read when present: adb-deploy refuses to
+          # deploy an application that has data to back up without them.
+          read_backup_secret() {
+            infisical secrets get "$1" \
+              --projectId="${{ inputs.infisical-infrastructure-project-id }}" \
+              --env=prod --path=/cloudflare --plain --silent 2>/dev/null || true
+          }
+          backup_key_id="$(read_backup_secret R2_APP_BACKUP_ACCESS_KEY_ID)"
+          backup_secret="$(read_backup_secret R2_APP_BACKUP_SECRET_ACCESS_KEY)"
+          [[ -z "${backup_key_id}" ]] || echo "::add-mask::${backup_key_id}"
+          [[ -z "${backup_secret}" ]] || echo "::add-mask::${backup_secret}"
+
           # Variables are <application>_<key>; hyphens become underscores so
           # every name is a valid Jinja identifier (adb-web-platform ->
           # adb_web_platform_secret_key).
@@ -257,7 +270,13 @@ jobs:
           ' "${app_json}" > "${vars_json}"
 
           jq --arg token "${cloudflare_token}" \
-            '. + {cloudflare_api_token: $token}' \
+            --arg backup_key_id "${backup_key_id}" \
+            --arg backup_secret "${backup_secret}" \
+            '. + {cloudflare_api_token: $token}
+              + if $backup_key_id != "" and $backup_secret != "" then
+                  {app_backup_r2_access_key_id: $backup_key_id,
+                   app_backup_r2_secret_access_key: $backup_secret}
+                else {} end' \
             "${vars_json}" > "${vars_json}.tmp"
           mv "${vars_json}.tmp" "${vars_json}"
 
