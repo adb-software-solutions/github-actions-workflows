@@ -1,8 +1,11 @@
-name: Reusable Docker Build
+name: Reusable Docker Build CI
 
 # Builds the same images as docker-build-push.yml without logging in to the
 # registry or pushing anything, so pull requests prove their Dockerfiles
 # still build before they reach main.
+#
+# The -ci.yml name matters: adb-iac binds each application's pull-request
+# Infisical identity to job_workflow_ref .../workflows/*-ci.yml.
 
 on:
   workflow_call:
