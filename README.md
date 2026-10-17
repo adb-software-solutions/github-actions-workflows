@@ -177,6 +177,8 @@ DB_PASSWORD        -> <application>_db_password
 
 Shared platform secrets remain shared, for example `CLOUDFLARE_API_TOKEN -> cloudflare_api_token`.
 
+The application-backup R2 credentials in `adb-infrastructure` `/cloudflare` are passed too, when present: `R2_APP_BACKUP_ACCESS_KEY_ID -> app_backup_r2_access_key_id` and `R2_APP_BACKUP_SECRET_ACCESS_KEY -> app_backup_r2_secret_access_key`. They are optional here; adb-deploy refuses to deploy an application with data to back up without them.
+
 This keeps application deploy callers small while allowing `vars/applications/<application>.yml` in `adb-deploy` to remain the deployment catalogue.
 
 ## Versioning
