@@ -7,8 +7,47 @@ on:
         type: string
         required: true
       image-tag:
+        description: >-
+          Image tag to deploy. Empty (the default) builds build-images from this
+          commit and deploys its SHA, or deploys latest when build-images is
+          empty. A full Git SHA redeploys or rolls back to that image.
         type: string
-        default: latest
+        default: ""
+      build-images:
+        description: >-
+          JSON array of images to build from this commit before deploying,
+          built only when image-tag is empty. Each entry is an image suffix
+          ("website") or an object {"image": ..., plus any of "context",
+          "build-env-file", "build-env-keys", "optional-build-env-keys",
+          "build-arg-keys", "optional-build-arg-keys"}; the matching inputs
+          below are the defaults.
+        type: string
+        default: "[]"
+      build-context:
+        type: string
+        default: .
+      registry:
+        type: string
+        default: registry.digitalocean.com/adbsoftwaresolutions
+      infisical-registry-project-id:
+        description: Infisical project with the /docker-registry credentials (required to build).
+        type: string
+        default: ""
+      build-arg-keys:
+        type: string
+        default: "[]"
+      optional-build-arg-keys:
+        type: string
+        default: "[]"
+      build-env-file:
+        type: string
+        default: ""
+      build-env-keys:
+        type: string
+        default: "[]"
+      optional-build-env-keys:
+        type: string
+        default: "[]"
       ansible-extra-vars-json:
         type: string
         default: "{}"
@@ -33,8 +72,137 @@ permissions:
   id-token: write
 
 jobs:
+  # Decide what this run deploys: a tag given by the caller (redeploy or
+  # rollback), else the images built from this commit, else latest (callers
+  # that do not build here yet).
+  plan:
+    name: Plan ${{ inputs.application }}
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      images: ${{ steps.plan.outputs.images }}
+      image-tag: ${{ steps.plan.outputs.image-tag }}
+    steps:
+      - name: Choose the image tag
+        id: plan
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ inputs.image-tag }}
+          BUILD_IMAGES: ${{ inputs.build-images }}
+          REGISTRY_PROJECT: ${{ inputs.infisical-registry-project-id }}
+          DEFAULTS: >-
+            {"context": ${{ toJSON(inputs.build-context) }},
+             "build-env-file": ${{ toJSON(inputs.build-env-file) }},
+             "build-env-keys": ${{ toJSON(inputs.build-env-keys) }},
+             "optional-build-env-keys": ${{ toJSON(inputs.optional-build-env-keys) }},
+             "build-arg-keys": ${{ toJSON(inputs.build-arg-keys) }},
+             "optional-build-arg-keys": ${{ toJSON(inputs.optional-build-arg-keys) }}}
+        run: |
+          set -euo pipefail
+          # Every entry becomes a complete object; key lists stay JSON strings,
+          # as the build action expects.
+          images="$(jq -c --argjson defaults "${DEFAULTS}" '
+            map(if type == "string" then {image: .} else . end
+                | $defaults + (with_entries(
+                    if (.value | type) == "array" then .value |= tojson else . end)))
+            ' <<< "${BUILD_IMAGES}")"
+          jq -e 'all(.[]; (.image | type) == "string" and (.image | test("^[a-z0-9][a-z0-9-]*$")))' \
+            <<< "${images}" >/dev/null || { echo "Every build image needs a valid image name." >&2; exit 1; }
+          count="$(jq 'length' <<< "${images}")"
+          if [[ -n "${IMAGE_TAG}" ]]; then
+            build=false tag="${IMAGE_TAG}"
+          elif [[ "${count}" -gt 0 ]]; then
+            if [[ -z "${REGISTRY_PROJECT}" ]]; then
+              echo "build-images needs infisical-registry-project-id." >&2
+              exit 1
+            fi
+            build=true tag="${GITHUB_SHA}"
+          else
+            build=false tag=latest
+          fi
+          {
+            echo "build=${build}"
+            echo "images=${images}"
+            echo "image-tag=${tag}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Deploying ${tag} (build here: ${build})" >> "$GITHUB_STEP_SUMMARY"
+
+  # Images are built here, with the deploy identity (its OIDC binding allows
+  # only this workflow on the deploy branch), so the deployed image is exactly
+  # this commit.
+  build:
+    name: Build ${{ matrix.build.image }}
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        build: ${{ fromJSON(needs.plan.outputs.images) }}
+    steps:
+      - name: Check the branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" != refs/heads/deploy ]]; then
+            echo "Images are only built for deployment from refs/heads/deploy." >&2
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Infisical CLI
+        run: npm install --global @infisical/cli
+
+      - name: Authenticate to Infisical
+        shell: bash
+        env:
+          INFISICAL_API_URL: ${{ inputs.infisical-api-url }}
+        run: |
+          set -euo pipefail
+          oidc_token="$(curl -fsS -G \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            --data-urlencode "audience=https://github.com/adb-software-solutions" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}" | jq -r '.value')"
+          access_token="$(curl -fsS -X POST \
+            "${INFISICAL_API_URL}/api/v1/auth/oidc-auth/login" \
+            -H 'Content-Type: application/x-www-form-urlencoded' \
+            --data-urlencode "identityId=${{ inputs.infisical-identity-id }}" \
+            --data-urlencode "jwt=${oidc_token}" | jq -r '.accessToken')"
+          test -n "${access_token}" && test "${access_token}" != "null"
+          echo "::add-mask::${access_token}"
+          {
+            echo "INFISICAL_API_URL=${INFISICAL_API_URL}"
+            echo "INFISICAL_TOKEN=${access_token}"
+            echo "INFISICAL_DISABLE_UPDATE_CHECK=true"
+          } >> "$GITHUB_ENV"
+
+      - name: Build, push and scan
+        uses: adb-software-solutions/github-actions-workflows/.github/actions/docker-build-push@v1
+        with:
+          application: ${{ inputs.application }}
+          image: ${{ matrix.build.image }}
+          context: ${{ matrix.build.context }}
+          registry: ${{ inputs.registry }}
+          tag: ${{ needs.plan.outputs.image-tag }}
+          infisical-registry-project-id: ${{ inputs.infisical-registry-project-id }}
+          infisical-application-project-id: ${{ inputs.infisical-application-project-id }}
+          build-arg-keys: ${{ matrix.build['build-arg-keys'] }}
+          optional-build-arg-keys: ${{ matrix.build['optional-build-arg-keys'] }}
+          build-env-file: ${{ matrix.build['build-env-file'] }}
+          build-env-keys: ${{ matrix.build['build-env-keys'] }}
+          optional-build-env-keys: ${{ matrix.build['optional-build-env-keys'] }}
+
   deploy:
     name: Deploy ${{ inputs.application }}
+    needs: [plan, build]
+    # Runs when the build succeeded or was not needed; never after a failed build.
+    if: >-
+      always() && needs.plan.result == 'success'
+      && (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: ubuntu-latest
     concurrency:
       group: adb-deploy-${{ inputs.application }}
@@ -44,7 +212,7 @@ jobs:
         shell: bash
         env:
           APPLICATION: ${{ inputs.application }}
-          IMAGE_TAG: ${{ inputs.image-tag }}
+          IMAGE_TAG: ${{ needs.plan.outputs.image-tag }}
         run: |
           set -euo pipefail
 
@@ -304,7 +472,7 @@ jobs:
           set -euo pipefail
           ansible-playbook -i "${IAC_INVENTORY_DIR}/iac_hosts.yml" deploy_application.yml \
             --extra-vars "application_name=${{ inputs.application }}" \
-            --extra-vars "deployment_image_tag=${{ inputs.image-tag }}" \
+            --extra-vars "deployment_image_tag=${{ needs.plan.outputs.image-tag }}" \
             --extra-vars "@${{ steps.ansible-vars.outputs.path }}"
 
       - name: Remove temporary deployment material

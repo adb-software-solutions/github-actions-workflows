@@ -29,9 +29,9 @@ These are defaults, not hard requirements. Inputs exist for genuine differences 
 | `lint.yml` | Prepare the standard Python/Node/shell toolchain and run the repository's own `tools/lint`. |
 | `django-ci.yml` | Run Django tests with PostgreSQL and Valkey, produce coverage, and optionally upload it. |
 | `frontend-ci.yml` | Install pnpm dependencies, run frontend tests, and build the frontend, optionally against a throwaway MongoDB (`mongo: true`). |
-| `docker-build-push.yml` | Build one or more Docker images, authenticate to the ADB registry through Infisical, push, and scan them. |
+| `docker-build-push.yml` | Build one or more Docker images, authenticate to the ADB registry through Infisical, push, and scan them. Applications now build in `deploy-application.yml` instead. |
 | `docker-build-ci.yml` | Build the same images as `docker-build-push.yml` without logging in to the registry or pushing, so pull requests prove their Dockerfiles still build. |
-| `deploy-application.yml` | Authenticate through OIDC, obtain deployment credentials/secrets from Infisical, and invoke `adb-deploy`. |
+| `deploy-application.yml` | Build the application's images from the deploy commit (optional), then authenticate through OIDC, obtain deployment credentials/secrets from Infisical, and invoke `adb-deploy`. |
 | `devcontainer-ci.yml` | Build a repository devcontainer as a CI smoke test. |
 
 ## MongoDB in frontend CI
@@ -129,6 +129,56 @@ docker-build:
         build-env-file: website/.ci.env
         optional-build-env-keys: '["NEXT_PUBLIC_API_URL"]'
 ```
+
+## Build on deploy
+
+Applications build their images in `deploy-application.yml`, from the commit
+on `deploy`, and deploy that commit's SHA in the same run. What is live is
+therefore exactly the `deploy` branch: a newer `main` build can never be
+deployed by accident, and a deploy never races a still-running `main` build.
+
+```yaml
+on:
+  push:
+    branches: [deploy]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Leave empty to build and deploy this commit; a full Git SHA redeploys that image (rollback)
+        type: string
+        default: ""
+
+jobs:
+  deploy:
+    uses: adb-software-solutions/github-actions-workflows/.github/workflows/deploy-application.yml@v1
+    with:
+      application: stackedfinds
+      image-tag: ${{ inputs.image_tag }}
+      infisical-registry-project-id: <adb-container-registry project>
+      build-images: >-
+        ["backend", "celery-worker", "celery-beat",
+         {"image": "website", "build-env-file": "website/.ci.env",
+          "build-env-keys": ["NEXT_PUBLIC_API_URL", "NEXT_PUBLIC_SITE_URL"]}]
+      # ...plus the existing infisical-* deploy inputs
+```
+
+- `image-tag` empty: build `build-images` and deploy `${GITHUB_SHA}`.
+- `image-tag` set: deploy that image without building (redeploy, rollback).
+- No `build-images`: deploy `latest`, as before (callers not yet migrated).
+
+Each `build-images` entry is an image suffix or an object with `image` and
+any of `context`, `build-env-file`, `build-env-keys`,
+`optional-build-env-keys`, `build-arg-keys` and `optional-build-arg-keys`;
+the workflow inputs of the same names are the defaults. Images build in
+parallel, and the deploy runs only if every build succeeded.
+
+The build job runs inside `deploy-application.yml`, so it uses the
+application's **deploy** identity, whose OIDC binding only accepts this
+workflow on `refs/heads/deploy`; that identity already reads the registry and
+application projects. The build steps are the composite action
+`.github/actions/docker-build-push`, shared with `docker-build-push.yml`.
+`main` keeps its lint and tests; pull requests still prove the Dockerfiles
+build with `docker-build-ci.yml`.
 
 ## Deployment security
 
