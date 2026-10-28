@@ -109,13 +109,28 @@ jobs:
           set -euo pipefail
           [[ "${MONGO_URI_ENV}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { echo "::error::mongo-uri-env is not a variable name"; exit 1; }
           [[ "${MONGO_DATABASE}" =~ ^[A-Za-z0-9_-]{1,63}$ ]] || { echo "::error::mongo-database is not a database name"; exit 1; }
-          docker run -d --name ci-mongo -p 127.0.0.1:27017:27017 "${MONGO_IMAGE}" \
+          # MongoDB 8 exits at start-up on Linux 6.19+ (the runners' kernel since
+          # October 2026) because its TCMalloc per-CPU caches clash with glibc's
+          # rseq (SERVER-121912). The image sets glibc.pthread.rseq=0 to enable
+          # those caches; rseq=1 hands rseq back to glibc and TCMalloc falls
+          # back to per-thread caches.
+          docker run -d --name ci-mongo -p 127.0.0.1:27017:27017 \
+            -e GLIBC_TUNABLES=glibc.pthread.rseq=1 "${MONGO_IMAGE}" \
             --replSet rs0 --bind_ip_all --wiredTigerCacheSizeGB 0.25 >/dev/null
           mongosh() { docker exec ci-mongo mongosh --quiet --norc "$@"; }
+          mongo_failed() {
+            echo "::error::$1 (kernel $(uname -r), image ${MONGO_IMAGE})"
+            docker logs ci-mongo 2>&1 | tail -30
+            exit 1
+          }
+          running() { [[ "$(docker inspect -f '{{.State.Running}}' ci-mongo)" == true ]]; }
           for _ in $(seq 1 60); do
+            running || mongo_failed "MongoDB exited during start-up"
             mongosh --eval 'quit(db.adminCommand({ping: 1}).ok ? 0 : 1)' >/dev/null 2>&1 && break
             sleep 1
           done
+          mongosh --eval 'quit(db.adminCommand({ping: 1}).ok ? 0 : 1)' >/dev/null 2>&1 \
+            || mongo_failed "MongoDB did not answer within 60 seconds"
           # The member is named localhost:27017, which is the same server
           # from inside the container and from the runner.
           mongosh --eval "rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'localhost:27017'}]})" >/dev/null
@@ -123,7 +138,8 @@ jobs:
             mongosh --eval 'quit(db.hello().isWritablePrimary ? 0 : 1)' >/dev/null 2>&1 && break
             sleep 1
           done
-          mongosh --eval 'quit(db.hello().isWritablePrimary ? 0 : 1)' || { docker logs ci-mongo | tail -20; exit 1; }
+          mongosh --eval 'quit(db.hello().isWritablePrimary ? 0 : 1)' \
+            || mongo_failed "MongoDB did not become primary within 60 seconds"
           uri="mongodb://127.0.0.1:27017/${MONGO_DATABASE}?replicaSet=rs0"
           {
             echo "${MONGO_URI_ENV}=${uri}"
