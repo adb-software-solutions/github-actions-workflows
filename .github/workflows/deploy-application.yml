@@ -204,6 +204,9 @@ jobs:
       always() && needs.plan.result == 'success'
       && (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: ubuntu-latest
+    outputs:
+      host: ${{ steps.target.outputs.host }}
+      containers: ${{ steps.target.outputs.containers }}
     concurrency:
       group: adb-deploy-${{ inputs.application }}
       cancel-in-progress: false
@@ -305,6 +308,13 @@ jobs:
           fi
           echo "Deploying to ${host}."
           echo "host=${host}" >> "$GITHUB_OUTPUT"
+          # The containers that run this deploy's image, for the Slack message.
+          # Best effort: an unexpected definition shape never stops a deploy.
+          containers="$(yq -o=json '.application.components // []' "${definition}" | jq -r '
+            [.[] | .name, (.celery.beat_container_name // empty),
+                   (.celery.workers[]? | .container_name // .name)] | join(", ")')" \
+            || containers=""
+          echo "containers=${containers}" >> "$GITHUB_OUTPUT"
 
       - name: Load the adb-iac deploy inventory
         id: iac
@@ -482,3 +492,117 @@ jobs:
           rm -f ~/.ssh/id_ed25519
           rm -rf "${RUNNER_TEMP}/adb-migration"
           rm -rf "${RUNNER_TEMP}/iac-inventory"
+
+  # Post the result to Slack, using the webhook in the deployment bootstrap
+  # project (prod, /slack). Never changes the run's result: without the secret,
+  # or if Slack or Infisical fails, the job only leaves a warning.
+  notify:
+    name: Notify Slack
+    needs: [plan, build, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Install Infisical CLI
+        run: npm install --global @infisical/cli
+
+      - name: Authenticate to Infisical
+        shell: bash
+        env:
+          INFISICAL_API_URL: ${{ inputs.infisical-api-url }}
+        run: |
+          set -euo pipefail
+          oidc_token="$(curl -fsS -G \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            --data-urlencode "audience=https://github.com/adb-software-solutions" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}" | jq -r '.value')"
+          access_token="$(curl -fsS -X POST \
+            "${INFISICAL_API_URL}/api/v1/auth/oidc-auth/login" \
+            -H 'Content-Type: application/x-www-form-urlencoded' \
+            --data-urlencode "identityId=${{ inputs.infisical-identity-id }}" \
+            --data-urlencode "jwt=${oidc_token}" | jq -r '.accessToken')"
+          test -n "${access_token}" && test "${access_token}" != "null"
+          echo "::add-mask::${access_token}"
+          {
+            echo "INFISICAL_API_URL=${INFISICAL_API_URL}"
+            echo "INFISICAL_TOKEN=${access_token}"
+            echo "INFISICAL_DISABLE_UPDATE_CHECK=true"
+          } >> "$GITHUB_ENV"
+
+      - name: Post the deploy result
+        shell: bash
+        env:
+          APPLICATION: ${{ inputs.application }}
+          BOOTSTRAP_PROJECT: ${{ inputs.infisical-deployment-bootstrap-project-id }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          IMAGE_TAG: ${{ needs.plan.outputs.image-tag }}
+          BUILD_IMAGES: ${{ needs.plan.outputs.images }}
+          HOST: ${{ needs.deploy.outputs.host }}
+          CONTAINERS: ${{ needs.deploy.outputs.containers }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          webhook="$(infisical secrets get SLACK_DEPLOY_WEBHOOK_URL \
+            --projectId="${BOOTSTRAP_PROJECT}" \
+            --env=prod --path=/slack --plain --silent 2>/dev/null)" || webhook=""
+          if [[ -z "${webhook}" ]]; then
+            echo "::warning::SLACK_DEPLOY_WEBHOOK_URL is not set in the deployment bootstrap project (prod, /slack); not notifying."
+            exit 0
+          fi
+          echo "::add-mask::${webhook}"
+
+          results=" ${PLAN_RESULT} ${BUILD_RESULT} ${DEPLOY_RESULT} "
+          if [[ "${DEPLOY_RESULT}" == success ]]; then
+            icon=":white_check_mark:" status="deployed"
+          elif [[ "${results}" == *" cancelled "* ]]; then
+            icon=":white_circle:" status="deploy cancelled"
+          elif [[ "${PLAN_RESULT}" != success ]]; then
+            icon=":x:" status="deploy failed before building (nothing deployed)"
+          elif [[ "${BUILD_RESULT}" == failure ]]; then
+            icon=":x:" status="image build failed (nothing deployed)"
+          else
+            icon=":x:" status="deploy failed on the server"
+          fi
+
+          # The deploy job lists the containers from the adb-deploy definition;
+          # when it never ran, show the images this run was building instead.
+          label="Containers" names="${CONTAINERS}"
+          if [[ -z "${names}" ]]; then
+            label="Images" names="$(jq -r 'map(.image) | join(", ")' <<< "${BUILD_IMAGES:-[]}" 2>/dev/null)" || names=""
+          fi
+
+          payload="$(jq -n \
+            --arg app "${APPLICATION}" --arg icon "${icon}" --arg status "${status}" \
+            --arg host "${HOST}" --arg tag "${IMAGE_TAG}" --arg title "${COMMIT_MESSAGE%%$'\n'*}" \
+            --arg actor "${ACTOR}" --arg label "${label}" --arg names "${names}" \
+            --arg repo "${GITHUB_REPOSITORY}" \
+            --arg repo_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --arg run_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" '
+            def esc: gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;");
+            def or_dash: if . == "" then "-" else . end;
+            (if ($tag | test("^[0-9a-f]{40}$")) then "<\($repo_url)/commit/\($tag)|\($tag[0:7])>"
+             elif $tag == "" then "-" else "`\($tag | esc)`" end) as $tag_text
+            | {
+                text: "\($app) \($status)",
+                blocks: [
+                  {type: "section", text: {type: "mrkdwn",
+                    text: ("\($icon) *\($app | esc)* \($status)"
+                      + (if $title == "" then "" else "\n\($title | esc)" end))}},
+                  {type: "section", fields: ([
+                    {type: "mrkdwn", text: "*Host*\n\($host | or_dash | esc)"},
+                    {type: "mrkdwn", text: "*Image tag*\n\($tag_text)"},
+                    {type: "mrkdwn", text: "*By*\n\($actor | or_dash | esc)"}
+                  ] + (if $names == "" then [] else
+                    [{type: "mrkdwn", text: "*\($label)*\n\($names | esc)"}] end))},
+                  {type: "context", elements: [{type: "mrkdwn",
+                    text: "<\($repo_url)|\($repo | esc)> · <\($run_url)|View run>"}]}
+                ]
+              }')"
+
+          if ! curl -fsS -X POST -H 'Content-Type: application/json' \
+            --data "${payload}" "${webhook}" >/dev/null; then
+            echo "::warning::Slack did not accept the deploy notification."
+          fi
