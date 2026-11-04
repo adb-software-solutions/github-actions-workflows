@@ -231,6 +231,14 @@ The application-backup R2 credentials in `adb-infrastructure` `/cloudflare` are 
 
 This keeps application deploy callers small while allowing `vars/applications/<application>.yml` in `adb-deploy` to remain the deployment catalogue.
 
+## Deploy notifications
+
+Every deploy ends with a `notify` job that posts the result to Slack through the incoming webhook `SLACK_DEPLOY_WEBHOOK_URL` in `adb-deployment-bootstrap` (prod, `/slack`; the folder is managed by adb-iac). Callers need no changes.
+
+The message gives the application, the result (deployed, image build failed, failed before building, failed on the server, or cancelled), the commit title, host, image tag (linked to its commit when it is a SHA), who triggered it, and the containers that run the image, read from the application's adb-deploy definition (`components` plus Celery beat and workers). Postgres and Redis/Valkey containers are not listed, since a deploy does not change their image. When the deploy job never ran, it lists the images the run was building instead.
+
+The job cannot change the run's result. Without the secret, or when Infisical or Slack fails, it only leaves a warning.
+
 ## Versioning
 
 Feature branches may be used while developing or testing a workflow. Production callers should use a stable release tag such as `@v1`; use an immutable commit SHA where maximum reproducibility and supply-chain protection are required.
